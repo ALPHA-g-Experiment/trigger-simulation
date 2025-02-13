@@ -1,3 +1,6 @@
+use bon::Builder;
+pub use num_traits::identities::Zero;
+
 /// The source of a [`WireEvent`].
 #[derive(Clone, Copy, Debug)]
 pub enum Source {
@@ -23,4 +26,65 @@ pub enum Source {
 pub struct WireEvent<F> {
     pub source: Source,
     pub time: F,
+}
+
+/// A value that is known to be greater than zero.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Positive<F>(F);
+
+impl<F> Positive<F>
+where
+    F: Zero + PartialOrd,
+{
+    pub fn new(value: F) -> Option<Self> {
+        if value > F::zero() {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+}
+
+/// A generator of [`WireEvent`]s.
+///
+/// The generator produces a stream of [`WireEvent`]s all with the same source.
+/// All events are guaranteed to be in increasing order of time. A generator
+/// stops producing events when either the maximum time is reached or when the
+/// inter-arrival time distribution is exhausted.
+#[derive(Builder, Clone, Debug)]
+pub struct Generator<T, F, O> {
+    source: Source,
+    #[builder(with = |iter: impl IntoIterator<Item = Positive<F>, IntoIter = T>| iter.into_iter())]
+    inter_arrival_time: T,
+    max_time: Option<F>,
+    #[builder(setters(vis = "", name = afterpulse_internal))]
+    afterpulse: O,
+}
+
+use generator_builder::{IsUnset, SetAfterpulse, State};
+
+impl<T, F, O, I, S: State> GeneratorBuilder<T, F, O, S>
+where
+    O: FnMut(&WireEvent<F>) -> I,
+    I: IntoIterator<Item = WireEvent<F>>,
+{
+    pub fn afterpulse(self, f: O) -> GeneratorBuilder<T, F, O, SetAfterpulse<S>>
+    where
+        S::Afterpulse: IsUnset,
+    {
+        self.afterpulse_internal(f)
+    }
+}
+
+impl<T, F, O, I> Iterator for Generator<T, F, O>
+where
+    T: Iterator<Item = Positive<F>>,
+    O: FnMut(&WireEvent<F>) -> I,
+    I: IntoIterator<Item = WireEvent<F>>,
+{
+    type Item = WireEvent<F>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+    }
 }
