@@ -141,7 +141,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "trg-sim"
+name = "trg"
 version = "0.1.0"
 dependencies = [
  "bon",
