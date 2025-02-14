@@ -1,5 +1,6 @@
 use bon::bon;
 pub use num_traits::identities::Zero;
+use std::ops::Add;
 
 /// The source of a [`WireEvent`].
 #[derive(Clone, Copy, Debug)]
@@ -45,11 +46,10 @@ where
     }
 }
 
-// Internal state of a generator.
 #[derive(Clone, Copy, Debug)]
-struct GenState<F> {
-    prev_time: F,
+struct SecondaryGen<F, O> {
     next_event: Option<WireEvent<F>>,
+    iter: O,
 }
 
 /// A generator of [`WireEvent`]s.
@@ -69,8 +69,8 @@ pub struct Generator<F, T, G, O> {
     // secondary events) allows us to handle e.g. infinite secondary generators
     // because we don't have to completely collect them before producing another
     // primary event.
-    inner: GenState<F>,
-    secondary: Vec<(GenState<F>, O)>,
+    next_event: Option<WireEvent<F>>,
+    secondaries: Vec<SecondaryGen<F, O>>,
 }
 
 #[bon]
@@ -81,32 +81,41 @@ impl<F, T, G, O> Generator<F, T, G, O> {
         // `F: Default + Add<Output = F>` is another option, but given that
         // `Zero` is already a requirement to build a `Positive<F>`, it seems
         // more appropriate.
-        F: Zero,
+        F: Zero + PartialOrd,
         I: IntoIterator<IntoIter = T>,
         T: Iterator<Item = Positive<F>>,
     {
         let mut inter_arrival_time = inter_arrival_time.into_iter();
 
-        let next_event = inter_arrival_time
-            .next()
-            .map(|Positive(time)| WireEvent { source, time });
+        let next_event = match (inter_arrival_time.next(), &max_time) {
+            (Some(Positive(time)), Some(max_t)) => {
+                if time < *max_t {
+                    Some(WireEvent { source, time })
+                } else {
+                    None
+                }
+            }
+            (Some(Positive(time)), None) => Some(WireEvent { source, time }),
+            (None, _) => None,
+        };
 
         Self {
             source,
             max_time,
             inter_arrival_time,
             afterpulse,
-            inner: GenState {
-                prev_time: F::zero(),
-                next_event,
-            },
-            secondary: Vec::new(),
+            next_event,
+            secondaries: Vec::new(),
         }
     }
 }
 
 impl<F, T, G, O> Iterator for Generator<F, T, G, O>
 where
+    // We don't need a full `Ord` implementation because `Positive<F>` already
+    // guarantees that the value is greater than zero (e.g. no NaNs could get
+    // here).
+    F: PartialOrd + for<'a> Add<&'a F, Output = F>,
     T: Iterator<Item = Positive<F>>,
     G: FnMut(&WireEvent<F>) -> O,
     O: Iterator<Item = WireEvent<F>>,
@@ -114,6 +123,41 @@ where
     type Item = WireEvent<F>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        if let Some(index) = self
+            .secondaries
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                // Unwrap is safe because we only push `Some` values (and it
+                // only happens in this same function below).
+                let a_time = &a.next_event.as_ref().unwrap().time;
+                let b_time = &b.next_event.as_ref().unwrap().time;
+                // Unwrap is safe for the same reason we only need `PartialOrd`
+                // instead of `Ord`.
+                a_time.partial_cmp(b_time).unwrap()
+            })
+            .map(|(i, _)| i)
+        {
+            let next_secondary = &self.secondaries[index];
+            todo!()
+        } else {
+            match (self.next_event.take(), self.inter_arrival_time.next()) {
+                (Some(event), Some(Positive(t))) => {
+                    let next_time = t + &event.time;
+                    if let Some(max_time) = &self.max_time {
+                        if next_time < *max_time {
+                            self.next_event = Some(WireEvent {
+                                source: self.source,
+                                time: next_time,
+                            });
+                        }
+                    }
+
+                    Some(event)
+                }
+                (Some(event), None) => Some(event),
+                (None, _) => None,
+            }
+        }
     }
 }
