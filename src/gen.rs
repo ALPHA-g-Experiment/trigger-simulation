@@ -1,4 +1,4 @@
-use bon::Builder;
+use bon::bon;
 pub use num_traits::identities::Zero;
 
 /// The source of a [`WireEvent`].
@@ -51,36 +51,35 @@ where
 /// All events are guaranteed to be in increasing order of time. A generator
 /// stops producing events when either the maximum time is reached or when the
 /// inter-arrival time distribution is exhausted.
-#[derive(Builder, Clone, Debug)]
-pub struct Generator<T, F, O> {
+#[derive(Clone, Debug)]
+pub struct Generator<F, T, G> {
     source: Source,
-    #[builder(with = |iter: impl IntoIterator<Item = Positive<F>, IntoIter = T>| iter.into_iter())]
-    inter_arrival_time: T,
     max_time: Option<F>,
-    #[builder(setters(vis = "", name = afterpulse_internal))]
-    afterpulse: O,
+    inter_arrival_time: T,
+    afterpulse: G,
 }
 
-use generator_builder::{IsUnset, SetAfterpulse, State};
-
-impl<T, F, O, I, S: State> GeneratorBuilder<T, F, O, S>
-where
-    O: FnMut(&WireEvent<F>) -> I,
-    I: IntoIterator<Item = WireEvent<F>>,
-{
-    pub fn afterpulse(self, f: O) -> GeneratorBuilder<T, F, O, SetAfterpulse<S>>
+#[bon]
+impl<F, T, G> Generator<F, T, G> {
+    #[builder]
+    pub fn new<I>(source: Source, max_time: Option<F>, inter_arrival_time: I, afterpulse: G) -> Self
     where
-        S::Afterpulse: IsUnset,
+        I: IntoIterator<IntoIter = T>,
     {
-        self.afterpulse_internal(f)
+        Self {
+            source,
+            max_time,
+            inter_arrival_time: inter_arrival_time.into_iter(),
+            afterpulse,
+        }
     }
 }
 
-impl<T, F, O, I> Iterator for Generator<T, F, O>
+impl<F, T, G, O> Iterator for Generator<F, T, G>
 where
     T: Iterator<Item = Positive<F>>,
-    O: FnMut(&WireEvent<F>) -> I,
-    I: IntoIterator<Item = WireEvent<F>>,
+    G: FnMut(&WireEvent<F>) -> O,
+    O: IntoIterator<Item = WireEvent<F>>,
 {
     type Item = WireEvent<F>;
 
