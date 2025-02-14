@@ -45,6 +45,13 @@ where
     }
 }
 
+// Internal state of a generator.
+#[derive(Clone, Copy, Debug)]
+struct GenState<F> {
+    prev_time: F,
+    next_event: Option<WireEvent<F>>,
+}
+
 /// A generator of [`WireEvent`]s.
 ///
 /// The generator produces a stream of [`WireEvent`]s all with the same source.
@@ -52,34 +59,57 @@ where
 /// stops producing events when either the maximum time is reached or when the
 /// inter-arrival time distribution is exhausted.
 #[derive(Clone, Debug)]
-pub struct Generator<F, T, G> {
+pub struct Generator<F, T, G, O> {
     source: Source,
     max_time: Option<F>,
     inter_arrival_time: T,
     afterpulse: G,
+
+    // Keeping track of the inner state this way (both for primary and
+    // secondary events) allows us to handle e.g. infinite secondary generators
+    // because we don't have to completely collect them before producing another
+    // primary event.
+    inner: GenState<F>,
+    secondary: Vec<(GenState<F>, O)>,
 }
 
 #[bon]
-impl<F, T, G> Generator<F, T, G> {
+impl<F, T, G, O> Generator<F, T, G, O> {
     #[builder]
     pub fn new<I>(source: Source, max_time: Option<F>, inter_arrival_time: I, afterpulse: G) -> Self
     where
+        // `F: Default + Add<Output = F>` is another option, but given that
+        // `Zero` is already a requirement to build a `Positive<F>`, it seems
+        // more appropriate.
+        F: Zero,
         I: IntoIterator<IntoIter = T>,
+        T: Iterator<Item = Positive<F>>,
     {
+        let mut inter_arrival_time = inter_arrival_time.into_iter();
+
+        let next_event = inter_arrival_time
+            .next()
+            .map(|Positive(time)| WireEvent { source, time });
+
         Self {
             source,
             max_time,
-            inter_arrival_time: inter_arrival_time.into_iter(),
+            inter_arrival_time,
             afterpulse,
+            inner: GenState {
+                prev_time: F::zero(),
+                next_event,
+            },
+            secondary: Vec::new(),
         }
     }
 }
 
-impl<F, T, G, O> Iterator for Generator<F, T, G>
+impl<F, T, G, O> Iterator for Generator<F, T, G, O>
 where
     T: Iterator<Item = Positive<F>>,
     G: FnMut(&WireEvent<F>) -> O,
-    O: IntoIterator<Item = WireEvent<F>>,
+    O: Iterator<Item = WireEvent<F>>,
 {
     type Item = WireEvent<F>;
 
