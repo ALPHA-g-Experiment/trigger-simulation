@@ -48,7 +48,7 @@ where
 
 #[derive(Clone, Copy, Debug)]
 struct SecondaryGen<F, O> {
-    next_event: Option<WireEvent<F>>,
+    next_event: WireEvent<F>,
     iter: O,
 }
 
@@ -128,13 +128,8 @@ where
             .iter()
             .enumerate()
             .min_by(|(_, a), (_, b)| {
-                // Unwrap is safe because we only push `Some` values (and it
-                // only happens in this same function below).
-                let a_time = &a.next_event.as_ref().unwrap().time;
-                let b_time = &b.next_event.as_ref().unwrap().time;
-                // Unwrap is safe for the same reason we only need `PartialOrd`
-                // instead of `Ord`.
-                a_time.partial_cmp(b_time).unwrap()
+                // Unwrap is safe for the same reason we only ask `PartialOrd`
+                a.next_event.time.partial_cmp(&b.next_event.time).unwrap()
             })
             .map(|(i, _)| i)
         {
