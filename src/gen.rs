@@ -110,6 +110,32 @@ impl<F, T, G, O> Generator<F, T, G, O> {
     }
 }
 
+impl<F, T, G, O> Generator<F, T, G, O>
+where
+    F: PartialOrd + for<'a> Add<&'a F, Output = F>,
+    T: Iterator<Item = Positive<F>>,
+{
+    fn generate_primary(&mut self) -> Option<WireEvent<F>> {
+        match (self.next_event.take(), self.inter_arrival_time.next()) {
+            (Some(event), Some(Positive(t))) => {
+                let next_time = t + &event.time;
+                if let Some(max_time) = &self.max_time {
+                    if next_time < *max_time {
+                        self.next_event = Some(WireEvent {
+                            source: self.source,
+                            time: next_time,
+                        });
+                    }
+                }
+
+                Some(event)
+            }
+            (Some(event), None) => Some(event),
+            (None, _) => None,
+        }
+    }
+}
+
 impl<F, T, G, O> Iterator for Generator<F, T, G, O>
 where
     // We don't need a full `Ord` implementation because `Positive<F>` already
@@ -136,23 +162,7 @@ where
             let next_secondary = &self.secondaries[index];
             todo!()
         } else {
-            match (self.next_event.take(), self.inter_arrival_time.next()) {
-                (Some(event), Some(Positive(t))) => {
-                    let next_time = t + &event.time;
-                    if let Some(max_time) = &self.max_time {
-                        if next_time < *max_time {
-                            self.next_event = Some(WireEvent {
-                                source: self.source,
-                                time: next_time,
-                            });
-                        }
-                    }
-
-                    Some(event)
-                }
-                (Some(event), None) => Some(event),
-                (None, _) => None,
-            }
+            self.generate_primary()
         }
     }
 }
