@@ -88,22 +88,34 @@ where
     }
 }
 
+mod sealed {
+    pub trait Sealed {}
+}
+
+// I don't see any reason to allow users downstream to implement this trait.
+// Re-evaluate if there's a good reason to do so. But its easier to prevent
+// misuse by sealing the trait.
 /// Generator of [`WireEvent`]s.
-pub trait EventGenerator {
-    /// The type of the time.
+///
+/// Events are guaranteed to be produced in increasing order of time.
+pub trait EventGenerator: sealed::Sealed {
     type Time;
     fn next_event(&mut self) -> Option<WireEvent<Self::Time>>;
 }
 
 /// A generator of [`WireEvent`]s without afterpulses.
 ///
-/// The generator produces a stream of [`WireEvent`]s all with the same source.
-/// All events are guaranteed to be in increasing order of time. A generator
-/// stops producing events when either the maximum time is reached or when the
-/// inter-arrival time distribution is exhausted.
+/// The generator produces a stream of [`WireEvent`]s all with the same
+/// [`Source`]. A generator stops producing events when either it has exhausted
+/// the inter-arrival time distribution or the desired duration has been
+/// reached.
 #[derive(Clone, Debug)]
 pub struct SecondaryGenerator<F, I> {
     source: Source,
+    // Another alternative is to use a `current_time` instead. But I noticed
+    // that fetching the next event is needed basically everywhere (to e.g.
+    // check which of a set of generators is next). So it makes it easier to
+    // work with in the end.
     next_time: Option<F>,
     max_time: Option<F>,
     inter_arrival_time: I,
@@ -112,25 +124,38 @@ pub struct SecondaryGenerator<F, I> {
 #[bon]
 impl<F, I> SecondaryGenerator<F, I> {
     #[builder]
-    pub fn new(source: Source, origin: F, max_time: Option<F>, inter_arrival_time: I) -> Self
+    pub fn new<T>(
+        /// The source of the generated events.
+        source: Source,
+        /// The time at which the generator starts producing events. Note that
+        /// the first event is produced at `origin` + `delta_t`, where `delta_t`
+        /// is the first value produced by `inter_arrival_time`.
+        origin: F,
+        /// Length of time the generator produces events for. All events are
+        /// guaranteed to have a time less than `origin` + `duration`.
+        duration: Option<Positive<F>>,
+        /// The distribution of inter-arrival times between events.
+        inter_arrival_time: T,
+    ) -> Self
     where
         F: PartialOrd + for<'a> Add<&'a F, Output = F>,
+        T: IntoPositiveIterator<IntoPosIter = I>,
         I: PositiveIterator<Item = F>,
     {
-        let mut inter_arrival_time = inter_arrival_time;
+        let mut inter_arrival_time = inter_arrival_time.into_pos_iter();
 
-        let next_time = match (inter_arrival_time.next_positive(), &max_time) {
-            (Some(Positive(t)), Some(max_t)) => {
-                let next_time = origin + &t;
-                if next_time < *max_t {
-                    Some(next_time)
+        let next_time = match (inter_arrival_time.next_positive(), &duration) {
+            (Some(Positive(t)), Some(Positive(limit))) => {
+                if t < *limit {
+                    Some(t + &origin)
                 } else {
                     None
                 }
             }
-            (Some(Positive(t)), None) => Some(origin + &t),
+            (Some(Positive(t)), None) => Some(t + &origin),
             (None, _) => None,
         };
+        let max_time = duration.map(|Positive(t)| t + &origin);
 
         Self {
             source,
@@ -140,6 +165,8 @@ impl<F, I> SecondaryGenerator<F, I> {
         }
     }
 }
+
+impl<F, I> sealed::Sealed for SecondaryGenerator<F, I> {}
 
 impl<F, I> EventGenerator for SecondaryGenerator<F, I>
 where
@@ -159,6 +186,8 @@ where
                     if next_time < *max_time {
                         self.next_time = Some(next_time);
                     }
+                } else {
+                    self.next_time = Some(next_time);
                 }
 
                 Some(WireEvent {
@@ -187,6 +216,7 @@ where
     }
 }
 
+/*
 /// A generator of [`WireEvent`]s supporting afterpulses.
 #[derive(Clone, Debug)]
 pub struct PrimaryGenerator<F, I1, B, I2> {
@@ -195,6 +225,8 @@ pub struct PrimaryGenerator<F, I1, B, I2> {
     afterpulse: B,
     secondaries: Vec<SecondaryGenerator<F, I2>>,
 }
+
+impl<F, I1, B, I2> sealed::Sealed for PrimaryGenerator<F, I1, B, I2> {}
 
 #[bon]
 impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
@@ -315,5 +347,72 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_event()
+    }
+}
+*/
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::iter::repeat;
+
+    #[test]
+    fn positive_new() {
+        assert_eq!(Positive::new(0.0), None);
+        assert_eq!(Positive::new(-1.0), None);
+        assert_eq!(Positive::new(1.0), Some(Positive(1.0)));
+    }
+
+    #[test]
+    fn secondary_generator_source() {
+        let gen = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0.0)
+            .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            .build();
+
+        for event in gen {
+            assert!(matches!(event.source, Source::Noise));
+        }
+    }
+
+    #[test]
+    fn secondary_generator_origin() {
+        let mut gen = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(-10.0)
+            .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            .build();
+
+        assert_eq!(gen.next().unwrap().time, -9.0);
+    }
+
+    #[test]
+    fn secondary_generator_duration() {
+        let events = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0.0)
+            .duration(Positive::new(10.0).unwrap())
+            .inter_arrival_time(repeat(Positive::new(1.0).unwrap()))
+            .build()
+            .collect::<Vec<_>>();
+
+        assert_eq!(events.last().unwrap().time, 9.0);
+    }
+
+    #[test]
+    fn secondary_generator_inter_arrival_time() {
+        let mut gen = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0.0)
+            .inter_arrival_time(vec![
+                Positive::new(1.0).unwrap(),
+                Positive::new(2.0).unwrap(),
+            ])
+            .build();
+
+        assert_eq!(gen.next().unwrap().time, 1.0);
+        assert_eq!(gen.next().unwrap().time, 3.0);
+        assert!(gen.next().is_none());
     }
 }
