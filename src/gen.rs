@@ -46,21 +46,45 @@ where
     }
 }
 
-/// Generator of positive values.
-pub trait InterArrivalTime {
-    /// The type of the inter-arrival time.
+/// A trait for dealing with iterators that produce positive values.
+pub trait PositiveIterator {
+    /// The type of the positive value.
     type Item;
-    fn next(&mut self) -> Option<Positive<Self::Item>>;
+
+    fn next_positive(&mut self) -> Option<Positive<Self::Item>>;
 }
 
-impl<F, I> InterArrivalTime for I
+/// Conversion into a [`PositiveIterator`].
+pub trait IntoPositiveIterator {
+    /// The type of the positive value.
+    type Item;
+    /// Which kind of positive iterator are we turning this into?
+    type IntoPosIter: PositiveIterator<Item = Self::Item>;
+
+    fn into_pos_iter(self) -> Self::IntoPosIter;
+}
+
+impl<I, F> PositiveIterator for I
 where
     I: Iterator<Item = Positive<F>>,
 {
     type Item = F;
 
-    fn next(&mut self) -> Option<Positive<F>> {
+    fn next_positive(&mut self) -> Option<Positive<F>> {
         self.next()
+    }
+}
+
+impl<T, I, F> IntoPositiveIterator for T
+where
+    T: IntoIterator<IntoIter = I>,
+    I: Iterator<Item = Positive<F>>,
+{
+    type Item = F;
+    type IntoPosIter = I;
+
+    fn into_pos_iter(self) -> Self::IntoPosIter {
+        self.into_iter()
     }
 }
 
@@ -91,11 +115,11 @@ impl<F, I> SecondaryGenerator<F, I> {
     pub fn new(source: Source, origin: F, max_time: Option<F>, inter_arrival_time: I) -> Self
     where
         F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-        I: InterArrivalTime<Item = F>,
+        I: PositiveIterator<Item = F>,
     {
         let mut inter_arrival_time = inter_arrival_time;
 
-        let next_time = match (inter_arrival_time.next(), &max_time) {
+        let next_time = match (inter_arrival_time.next_positive(), &max_time) {
             (Some(Positive(t)), Some(max_t)) => {
                 let next_time = origin + &t;
                 if next_time < *max_t {
@@ -120,12 +144,15 @@ impl<F, I> SecondaryGenerator<F, I> {
 impl<F, I> EventGenerator for SecondaryGenerator<F, I>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-    I: InterArrivalTime<Item = F>,
+    I: PositiveIterator<Item = F>,
 {
     type Time = F;
 
     fn next_event(&mut self) -> Option<WireEvent<Self::Time>> {
-        match (self.next_time.take(), self.inter_arrival_time.next()) {
+        match (
+            self.next_time.take(),
+            self.inter_arrival_time.next_positive(),
+        ) {
             (Some(time), Some(Positive(delta_t))) => {
                 let next_time = delta_t + &time;
                 if let Some(max_time) = &self.max_time {
@@ -151,7 +178,7 @@ where
 impl<F, I> Iterator for SecondaryGenerator<F, I>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-    I: InterArrivalTime<Item = F>,
+    I: PositiveIterator<Item = F>,
 {
     type Item = WireEvent<F>;
 
@@ -181,7 +208,7 @@ impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
     ) -> Self
     where
         F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-        I1: InterArrivalTime<Item = F>,
+        I1: PositiveIterator<Item = F>,
     {
         let primary = SecondaryGenerator::builder()
             .source(source)
@@ -198,14 +225,49 @@ impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
     }
 }
 
+impl<F, I1, B, I2, S: State> PrimaryGenerator<F, I1, B, I2>
+where
+    F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
+    I1: PositiveIterator<Item = F>,
+    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, S>,
+    I2: PositiveIterator<Item = F>,
+    S::Source: IsSet,
+    S::Origin: IsUnset,
+    S::InterArrivalTime: IsSet,
+{
+    fn next_primary(&mut self) -> Option<WireEvent<F>> {
+        if let Some(next_event) = self.primary.next_event() {
+            let generator = (self.afterpulse)(&next_event)
+                .origin(next_event.time.clone())
+                .build();
+            if generator.next_time.is_some() {
+                self.secondaries.push(generator);
+            }
+
+            Some(next_event)
+        } else {
+            None
+        }
+    }
+
+    fn next_secondary(&mut self, index: usize) -> WireEvent<F> {
+        let next_event = self.secondaries[index].next_event();
+        if self.secondaries[index].next_time.is_none() {
+            self.secondaries.swap_remove(index);
+        }
+
+        next_event.unwrap()
+    }
+}
+
 use secondary_generator_builder::{IsSet, IsUnset, State};
 
 impl<F, I1, B, I2, S: State> EventGenerator for PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
-    I1: InterArrivalTime<Item = F>,
+    I1: PositiveIterator<Item = F>,
     B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, S>,
-    I2: InterArrivalTime<Item = F>,
+    I2: PositiveIterator<Item = F>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
@@ -218,22 +280,23 @@ where
             .iter()
             .enumerate()
             .min_by(|(_, a), (_, b)| {
-                // Unwrap is safe because (given the InterArrivalTime trait) we
+                // Unwrap is safe because (given the PositiveIterator trait) we
                 // don't have NaNs.
                 a.next_time.partial_cmp(&b.next_time).unwrap()
             })
             .map(|(i, _)| i)
         {
-            todo!()
-        } else if let Some(next_event) = self.primary.next_event() {
-            let generator = (self.afterpulse)(&next_event)
-                .origin(next_event.time.clone())
-                .build();
-            self.secondaries.push(generator);
-
-            Some(next_event)
+            if let Some(next_primary) = &self.primary.next_time {
+                if next_primary < self.secondaries[index].next_time.as_ref().unwrap() {
+                    self.next_primary()
+                } else {
+                    Some(self.next_secondary(index))
+                }
+            } else {
+                Some(self.next_secondary(index))
+            }
         } else {
-            None
+            self.next_primary()
         }
     }
 }
@@ -241,9 +304,9 @@ where
 impl<F, I1, B, I2, S: State> Iterator for PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
-    I1: InterArrivalTime<Item = F>,
+    I1: PositiveIterator<Item = F>,
     B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, S>,
-    I2: InterArrivalTime<Item = F>,
+    I2: PositiveIterator<Item = F>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
