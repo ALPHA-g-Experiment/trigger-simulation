@@ -47,18 +47,21 @@ where
 }
 
 mod sealed {
-    pub trait Sealed {}
+    pub trait OrderedIterator: Iterator {}
 }
 
-// I don't see any reason to allow users downstream to implement this trait.
-// Re-evaluate if there's a good reason to do so. But its easier to prevent
-// misuse by sealing the trait.
 /// Generator of [`WireEvent`]s.
 ///
 /// Events are guaranteed to be produced in increasing order of time.
-pub trait EventGenerator: sealed::Sealed {
+pub trait EventGenerator: sealed::OrderedIterator<Item = WireEvent<Self::Time>> {
     type Time;
-    fn next_event(&mut self) -> Option<WireEvent<Self::Time>>;
+}
+
+impl<T, G> EventGenerator for G
+where
+    G: sealed::OrderedIterator<Item = WireEvent<T>>,
+{
+    type Time = T;
 }
 
 /// A generator of [`WireEvent`]s without afterpulses.
@@ -124,16 +127,14 @@ impl<F, I> SecondaryGenerator<F, I> {
     }
 }
 
-impl<F, I> sealed::Sealed for SecondaryGenerator<F, I> {}
-
-impl<F, I> EventGenerator for SecondaryGenerator<F, I>
+impl<F, I> Iterator for SecondaryGenerator<F, I>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F>,
     I: Iterator<Item = Positive<F>>,
 {
-    type Time = F;
+    type Item = WireEvent<F>;
 
-    fn next_event(&mut self) -> Option<WireEvent<Self::Time>> {
+    fn next(&mut self) -> Option<Self::Item> {
         match (self.next_time.take(), self.inter_arrival_time.next()) {
             (Some(time), Some(Positive(delta_t))) => {
                 let next_time = delta_t + &time;
@@ -159,16 +160,11 @@ where
     }
 }
 
-impl<F, I> Iterator for SecondaryGenerator<F, I>
+impl<F, I> sealed::OrderedIterator for SecondaryGenerator<F, I>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F>,
     I: Iterator<Item = Positive<F>>,
 {
-    type Item = WireEvent<F>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next_event()
-    }
 }
 
 /// A generator of [`WireEvent`]s with afterpulses.
@@ -241,7 +237,7 @@ where
     S::InterArrivalTime: IsSet,
 {
     fn next_primary(&mut self) -> Option<WireEvent<F>> {
-        if let Some(next_event) = self.primary.next_event() {
+        if let Some(next_event) = self.primary.next() {
             let generator = (self.afterpulse)(&next_event)
                 .origin(next_event.time.clone())
                 .build();
@@ -260,7 +256,7 @@ where
     fn next_secondary(&mut self, index: usize) -> WireEvent<F> {
         // Unwrap is safe because we only keep around generators that have
         // something to produce.
-        let next_event = self.secondaries[index].next_event().unwrap();
+        let next_event = self.secondaries[index].next().unwrap();
         // Only keep around secondary generators that have something to produce.
         if self.secondaries[index].next_time.is_none() {
             self.secondaries.swap_remove(index);
@@ -270,9 +266,7 @@ where
     }
 }
 
-impl<F, I1, B, I2> sealed::Sealed for PrimaryGenerator<F, I1, B, I2> {}
-
-impl<F, I1, B, I2, T2, S: State> EventGenerator for PrimaryGenerator<F, I1, B, I2>
+impl<F, I1, B, I2, T2, S: State> Iterator for PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
     I1: Iterator<Item = Positive<F>>,
@@ -283,9 +277,9 @@ where
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
 {
-    type Time = F;
+    type Item = WireEvent<F>;
 
-    fn next_event(&mut self) -> Option<WireEvent<Self::Time>> {
+    fn next(&mut self) -> Option<Self::Item> {
         if let Some(index) = self
             .secondaries
             .iter()
@@ -314,7 +308,7 @@ where
     }
 }
 
-impl<F, I1, B, I2, T2, S: State> Iterator for PrimaryGenerator<F, I1, B, I2>
+impl<F, I1, B, I2, T2, S: State> sealed::OrderedIterator for PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
     I1: Iterator<Item = Positive<F>>,
@@ -325,11 +319,6 @@ where
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
 {
-    type Item = WireEvent<F>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next_event()
-    }
 }
 
 #[cfg(test)]
