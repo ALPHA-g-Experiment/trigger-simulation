@@ -216,8 +216,11 @@ where
     }
 }
 
-/*
-/// A generator of [`WireEvent`]s supporting afterpulses.
+/// A generator of [`WireEvent`]s with afterpulses.
+///
+/// The generator produces a stream of [`WireEvent`]s in increasing order of
+/// time. Each primary event triggers a set of secondary events. The generator
+/// stops when all primary and secondary events have been produced.
 #[derive(Clone, Debug)]
 pub struct PrimaryGenerator<F, I1, B, I2> {
     primary: SecondaryGenerator<F, I1>,
@@ -226,26 +229,38 @@ pub struct PrimaryGenerator<F, I1, B, I2> {
     secondaries: Vec<SecondaryGenerator<F, I2>>,
 }
 
-impl<F, I1, B, I2> sealed::Sealed for PrimaryGenerator<F, I1, B, I2> {}
-
 #[bon]
 impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
     #[builder]
-    pub fn new(
+    pub fn new<T1>(
+        /// The source of the primary events.
         source: Source,
+        /// The time at which the generator starts producing events. Note that
+        /// the first event is produced at `origin` + `delta_t`, where `delta_t`
+        /// is the first value produced by `inter_arrival_time`.
         origin: F,
-        max_time: Option<F>,
-        inter_arrival_time: I1,
+        /// Length of time the generator produces primary events for. Note that
+        /// the generator will keep producing secondary events until all
+        /// secondary generators have also been exhausted (which could be after
+        /// the primary generator has stopped producing events).
+        duration: Option<Positive<F>>,
+        /// The distribution of inter-arrival times between primary events.
+        inter_arrival_time: T1,
+        /// Secondary generator builder.
+        ///
+        /// The `origin` of the secondary generator is automatically set to the
+        /// time of the primary event that triggered it.
         afterpulse: B,
     ) -> Self
     where
         F: PartialOrd + for<'a> Add<&'a F, Output = F>,
+        T1: IntoPositiveIterator<IntoPosIter = I1>,
         I1: PositiveIterator<Item = F>,
     {
         let primary = SecondaryGenerator::builder()
             .source(source)
             .origin(origin)
-            .maybe_max_time(max_time)
+            .maybe_duration(duration)
             .inter_arrival_time(inter_arrival_time)
             .build();
 
@@ -257,11 +272,14 @@ impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
     }
 }
 
-impl<F, I1, B, I2, S: State> PrimaryGenerator<F, I1, B, I2>
+use secondary_generator_builder::{IsSet, IsUnset, State};
+
+impl<F, I1, B, I2, T2, S: State> PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
     I1: PositiveIterator<Item = F>,
-    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, S>,
+    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, T2, S>,
+    T2: IntoPositiveIterator<IntoPosIter = I2>,
     I2: PositiveIterator<Item = F>,
     S::Source: IsSet,
     S::Origin: IsUnset,
@@ -272,6 +290,8 @@ where
             let generator = (self.afterpulse)(&next_event)
                 .origin(next_event.time.clone())
                 .build();
+            // Only keep around secondary generators that have something to
+            // produce.
             if generator.next_time.is_some() {
                 self.secondaries.push(generator);
             }
@@ -283,22 +303,26 @@ where
     }
 
     fn next_secondary(&mut self, index: usize) -> WireEvent<F> {
-        let next_event = self.secondaries[index].next_event();
+        // Unwrap is safe because we only keep around generators that have
+        // something to produce.
+        let next_event = self.secondaries[index].next_event().unwrap();
+        // Only keep around secondary generators that have something to produce.
         if self.secondaries[index].next_time.is_none() {
             self.secondaries.swap_remove(index);
         }
 
-        next_event.unwrap()
+        next_event
     }
 }
 
-use secondary_generator_builder::{IsSet, IsUnset, State};
+impl<F, I1, B, I2> sealed::Sealed for PrimaryGenerator<F, I1, B, I2> {}
 
-impl<F, I1, B, I2, S: State> EventGenerator for PrimaryGenerator<F, I1, B, I2>
+impl<F, I1, B, I2, T2, S: State> EventGenerator for PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
     I1: PositiveIterator<Item = F>,
-    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, S>,
+    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, T2, S>,
+    T2: IntoPositiveIterator<IntoPosIter = I2>,
     I2: PositiveIterator<Item = F>,
     S::Source: IsSet,
     S::Origin: IsUnset,
@@ -319,6 +343,8 @@ where
             .map(|(i, _)| i)
         {
             if let Some(next_primary) = &self.primary.next_time {
+                // Unwrap is safe because we only keep around secondary
+                // generators that have something to produce.
                 if next_primary < self.secondaries[index].next_time.as_ref().unwrap() {
                     self.next_primary()
                 } else {
@@ -333,11 +359,12 @@ where
     }
 }
 
-impl<F, I1, B, I2, S: State> Iterator for PrimaryGenerator<F, I1, B, I2>
+impl<F, I1, B, I2, T2, S: State> Iterator for PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
     I1: PositiveIterator<Item = F>,
-    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, S>,
+    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, T2, S>,
+    T2: IntoPositiveIterator<IntoPosIter = I2>,
     I2: PositiveIterator<Item = F>,
     S::Source: IsSet,
     S::Origin: IsUnset,
@@ -349,7 +376,6 @@ where
         self.next_event()
     }
 }
-*/
 
 #[cfg(test)]
 mod tests {
@@ -413,6 +439,116 @@ mod tests {
 
         assert_eq!(gen.next().unwrap().time, 1.0);
         assert_eq!(gen.next().unwrap().time, 3.0);
+        assert!(gen.next().is_none());
+    }
+
+    #[test]
+    fn primary_generator_source() {
+        let mut gen = PrimaryGenerator::builder()
+            .source(Source::PrimaryPbar)
+            .origin(0.0)
+            .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            .afterpulse(|_: &_| {
+                SecondaryGenerator::builder()
+                    .source(Source::SecondaryPbar)
+                    .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            })
+            .build();
+
+        assert!(matches!(gen.next().unwrap().source, Source::PrimaryPbar));
+        assert!(matches!(gen.next().unwrap().source, Source::SecondaryPbar));
+    }
+
+    #[test]
+    fn primary_generator_origin() {
+        let mut gen = PrimaryGenerator::builder()
+            .source(Source::PrimaryPbar)
+            .origin(0.0)
+            .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            .afterpulse(|_: &_| {
+                SecondaryGenerator::builder()
+                    .source(Source::SecondaryPbar)
+                    .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            })
+            .build();
+
+        assert_eq!(gen.next().unwrap().time, 1.0);
+    }
+
+    #[test]
+    fn primary_generator_duration() {
+        let events = PrimaryGenerator::builder()
+            .source(Source::PrimaryPbar)
+            .origin(0.0)
+            .duration(Positive::new(10.0).unwrap())
+            .inter_arrival_time(repeat(Positive::new(1.0).unwrap()))
+            .afterpulse(|_: &_| {
+                SecondaryGenerator::builder()
+                    .source(Source::SecondaryPbar)
+                    .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            })
+            .build()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.source, Source::PrimaryPbar))
+                .last()
+                .unwrap()
+                .time,
+            9.0
+        );
+        assert_eq!(events.last().unwrap().time, 10.0);
+    }
+
+    #[test]
+    fn primary_generator_inter_arrival_time() {
+        let mut gen = PrimaryGenerator::builder()
+            .source(Source::PrimaryPbar)
+            .origin(0.0)
+            .inter_arrival_time(vec![
+                Positive::new(1.0).unwrap(),
+                Positive::new(2.0).unwrap(),
+            ])
+            .afterpulse(|_: &_| {
+                SecondaryGenerator::builder()
+                    .source(Source::SecondaryPbar)
+                    .inter_arrival_time(vec![Positive::new(0.1).unwrap()])
+            })
+            .build()
+            .filter(|e| matches!(e.source, Source::PrimaryPbar));
+
+        assert_eq!(gen.next().unwrap().time, 1.0);
+        assert_eq!(gen.next().unwrap().time, 3.0);
+        assert!(gen.next().is_none());
+    }
+
+    #[test]
+    fn primary_generator_afterpulse() {
+        let mut count = 0;
+
+        let mut gen = PrimaryGenerator::builder()
+            .source(Source::PrimaryPbar)
+            .origin(0.0)
+            .inter_arrival_time(repeat(Positive::new(1.0).unwrap()).take(3))
+            .afterpulse(|_: &_| {
+                let n = count;
+                let delta_t = 1.0 / (n + 1) as f64;
+                count += 1;
+
+                SecondaryGenerator::builder()
+                    .source(Source::SecondaryPbar)
+                    .inter_arrival_time(repeat(Positive::new(delta_t).unwrap()).take(n))
+            })
+            .build();
+
+        assert!((gen.next().unwrap().time - 1.0).abs() < 1e-6);
+        assert!((gen.next().unwrap().time - 2.0).abs() < 1e-6);
+        assert!((gen.next().unwrap().time - 2.5).abs() < 1e-6);
+        assert!((gen.next().unwrap().time - 3.0).abs() < 1e-6);
+        assert!((gen.next().unwrap().time - 10.0 / 3.0).abs() < 1e-6);
+        assert!((gen.next().unwrap().time - 11.0 / 3.0).abs() < 1e-6);
         assert!(gen.next().is_none());
     }
 }
