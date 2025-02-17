@@ -46,38 +46,6 @@ where
     }
 }
 
-/// A trait for dealing with iterators that produce positive values.
-pub trait PositiveIterator: Iterator<Item = Positive<Self::Type>> {
-    type Type;
-}
-
-impl<T, I: Iterator<Item = Positive<T>>> PositiveIterator for I {
-    type Type = T;
-}
-
-/// Conversion into a [`PositiveIterator`].
-pub trait IntoPositiveIterator {
-    /// The type of the positive value.
-    type Item;
-    /// Which kind of positive iterator are we turning this into?
-    type IntoPosIter: PositiveIterator<Type = Self::Item>;
-
-    fn into_pos_iter(self) -> Self::IntoPosIter;
-}
-
-impl<T, I, F> IntoPositiveIterator for T
-where
-    T: IntoIterator<IntoIter = I>,
-    I: Iterator<Item = Positive<F>>,
-{
-    type Item = F;
-    type IntoPosIter = I;
-
-    fn into_pos_iter(self) -> Self::IntoPosIter {
-        self.into_iter()
-    }
-}
-
 mod sealed {
     pub trait Sealed {}
 }
@@ -129,10 +97,10 @@ impl<F, I> SecondaryGenerator<F, I> {
     ) -> Self
     where
         F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-        T: IntoPositiveIterator<IntoPosIter = I>,
-        I: PositiveIterator<Type = F>,
+        T: IntoIterator<IntoIter = I>,
+        I: Iterator<Item = Positive<F>>,
     {
-        let mut inter_arrival_time = inter_arrival_time.into_pos_iter();
+        let mut inter_arrival_time = inter_arrival_time.into_iter();
 
         let next_time = match (inter_arrival_time.next(), &duration) {
             (Some(Positive(t)), Some(Positive(limit))) => {
@@ -161,7 +129,7 @@ impl<F, I> sealed::Sealed for SecondaryGenerator<F, I> {}
 impl<F, I> EventGenerator for SecondaryGenerator<F, I>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-    I: PositiveIterator<Type = F>,
+    I: Iterator<Item = Positive<F>>,
 {
     type Time = F;
 
@@ -194,7 +162,7 @@ where
 impl<F, I> Iterator for SecondaryGenerator<F, I>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-    I: PositiveIterator<Type = F>,
+    I: Iterator<Item = Positive<F>>,
 {
     type Item = WireEvent<F>;
 
@@ -241,8 +209,8 @@ impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
     ) -> Self
     where
         F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-        T1: IntoPositiveIterator<IntoPosIter = I1>,
-        I1: PositiveIterator<Type = F>,
+        T1: IntoIterator<IntoIter = I1>,
+        I1: Iterator<Item = Positive<F>>,
     {
         let primary = SecondaryGenerator::builder()
             .source(source)
@@ -264,10 +232,10 @@ use secondary_generator_builder::{IsSet, IsUnset, State};
 impl<F, I1, B, I2, T2, S: State> PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
-    I1: PositiveIterator<Type = F>,
+    I1: Iterator<Item = Positive<F>>,
     B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, T2, S>,
-    T2: IntoPositiveIterator<IntoPosIter = I2>,
-    I2: PositiveIterator<Type = F>,
+    T2: IntoIterator<IntoIter = I2>,
+    I2: Iterator<Item = Positive<F>>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
@@ -307,10 +275,10 @@ impl<F, I1, B, I2> sealed::Sealed for PrimaryGenerator<F, I1, B, I2> {}
 impl<F, I1, B, I2, T2, S: State> EventGenerator for PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
-    I1: PositiveIterator<Type = F>,
+    I1: Iterator<Item = Positive<F>>,
     B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, T2, S>,
-    T2: IntoPositiveIterator<IntoPosIter = I2>,
-    I2: PositiveIterator<Type = F>,
+    T2: IntoIterator<IntoIter = I2>,
+    I2: Iterator<Item = Positive<F>>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
@@ -349,10 +317,10 @@ where
 impl<F, I1, B, I2, T2, S: State> Iterator for PrimaryGenerator<F, I1, B, I2>
 where
     F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
-    I1: PositiveIterator<Type = F>,
+    I1: Iterator<Item = Positive<F>>,
     B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, T2, S>,
-    T2: IntoPositiveIterator<IntoPosIter = I2>,
-    I2: PositiveIterator<Type = F>,
+    T2: IntoIterator<IntoIter = I2>,
+    I2: Iterator<Item = Positive<F>>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
