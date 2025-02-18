@@ -1,5 +1,6 @@
 use bon::bon;
 pub use num_traits::identities::Zero;
+use std::iter::Peekable;
 use std::ops::Add;
 
 /// The source of a [`WireEvent`].
@@ -64,6 +65,15 @@ where
     type Time = T;
 }
 
+/// A trait for dealing with iterators that produce positive values.
+pub trait PositiveIterator: Iterator<Item = Positive<Self::Type>> {
+    type Type;
+}
+
+impl<T, I: Iterator<Item = Positive<T>>> PositiveIterator for I {
+    type Type = T;
+}
+
 /// A generator of [`WireEvent`]s without afterpulses.
 ///
 /// The generator produces a stream of [`WireEvent`]s all with the same
@@ -71,19 +81,21 @@ where
 /// the inter-arrival time distribution or the desired duration has been
 /// reached.
 #[derive(Clone, Debug)]
-pub struct SecondaryGenerator<F, I> {
+pub struct SecondaryGenerator<I>
+where
+    I: PositiveIterator,
+{
     source: Source,
-    // Another alternative is to use a `current_time` instead. But I noticed
-    // that fetching the next event is needed basically everywhere (to e.g.
-    // check which of a set of generators is next). So it makes it easier to
-    // work with in the end.
-    next_time: Option<F>,
-    max_time: Option<F>,
+    current_time: Option<I::Type>,
+    max_time: Option<I::Type>,
     inter_arrival_time: I,
 }
 
 #[bon]
-impl<F, I> SecondaryGenerator<F, I> {
+impl<I> SecondaryGenerator<I>
+where
+    I: PositiveIterator,
+{
     #[builder]
     pub fn new<T>(
         /// The source of the generated events.
@@ -91,59 +103,53 @@ impl<F, I> SecondaryGenerator<F, I> {
         /// The time at which the generator starts producing events. Note that
         /// the first event is produced at `origin` + `delta_t`, where `delta_t`
         /// is the first value produced by `inter_arrival_time`.
-        origin: F,
+        origin: I::Type,
         /// Length of time the generator produces events for. All events are
         /// guaranteed to have a time less than `origin` + `duration`.
-        duration: Option<Positive<F>>,
+        duration: Option<Positive<I::Type>>,
         /// The distribution of inter-arrival times between events.
         inter_arrival_time: T,
     ) -> Self
     where
-        F: PartialOrd + for<'a> Add<&'a F, Output = F>,
         T: IntoIterator<IntoIter = I>,
-        I: Iterator<Item = Positive<F>>,
+        // Another alternative could be
+        // `I::Type: for<'a> Add<&'a I::Type, Output = I::Type>` instead.
+        // But:
+        // 1. `impl Iterator` requires `I::Type: Clone` anyway.
+        // 2. I want to use `Quantity` types from the `uom` crate, and these
+        // don't implement `Add<&T, Output = T>` yet (maybe soon they will).
+        I::Type: Add<I::Type, Output = I::Type> + Clone,
     {
-        let mut inter_arrival_time = inter_arrival_time.into_iter();
-
-        let next_time = match (inter_arrival_time.next(), &duration) {
-            (Some(Positive(t)), Some(Positive(limit))) => {
-                if t < *limit {
-                    Some(t + &origin)
-                } else {
-                    None
-                }
-            }
-            (Some(Positive(t)), None) => Some(t + &origin),
-            (None, _) => None,
-        };
-        let max_time = duration.map(|Positive(t)| t + &origin);
-
         Self {
             source,
-            next_time,
-            max_time,
-            inter_arrival_time,
+            current_time: Some(origin.clone()),
+            max_time: duration.map(|Positive(t)| t + origin),
+            inter_arrival_time: inter_arrival_time.into_iter(),
         }
     }
 }
 
-impl<F, I> Iterator for SecondaryGenerator<F, I>
+impl<I> Iterator for SecondaryGenerator<I>
 where
-    F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-    I: Iterator<Item = Positive<F>>,
+    I: PositiveIterator,
+    I::Type: Add<I::Type, Output = I::Type> + Clone + PartialOrd,
 {
-    type Item = WireEvent<F>;
+    type Item = WireEvent<I::Type>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match (self.next_time.take(), self.inter_arrival_time.next()) {
+        match (self.current_time.take(), self.inter_arrival_time.next()) {
+            (None, _) => None,
+            (_, None) => None,
             (Some(time), Some(Positive(delta_t))) => {
-                let next_time = delta_t + &time;
+                let time = time + delta_t;
                 if let Some(max_time) = &self.max_time {
-                    if next_time < *max_time {
-                        self.next_time = Some(next_time);
+                    if time < *max_time {
+                        self.current_time = Some(time.clone());
+                    } else {
+                        return None;
                     }
                 } else {
-                    self.next_time = Some(next_time);
+                    self.current_time = Some(time.clone());
                 }
 
                 Some(WireEvent {
@@ -151,19 +157,14 @@ where
                     time,
                 })
             }
-            (Some(time), None) => Some(WireEvent {
-                source: self.source,
-                time,
-            }),
-            (None, _) => None,
         }
     }
 }
 
-impl<F, I> sealed::OrderedIterator for SecondaryGenerator<F, I>
+impl<I> sealed::OrderedIterator for SecondaryGenerator<I>
 where
-    F: PartialOrd + for<'a> Add<&'a F, Output = F>,
-    I: Iterator<Item = Positive<F>>,
+    I: PositiveIterator,
+    I::Type: Add<I::Type, Output = I::Type> + Clone + PartialOrd,
 {
 }
 
@@ -172,16 +173,40 @@ where
 /// The generator produces a stream of [`WireEvent`]s in increasing order of
 /// time. Each primary event triggers a set of secondary events. The generator
 /// stops when all primary and secondary events have been produced.
-#[derive(Clone, Debug)]
-pub struct PrimaryGenerator<F, I1, B, I2> {
-    primary: SecondaryGenerator<F, I1>,
-
+pub struct PrimaryGenerator<I1, B, I2>
+where
+    I1: PositiveIterator,
+    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I2: PositiveIterator<Type = I1::Type>,
+{
+    primary: Peekable<SecondaryGenerator<I1>>,
     afterpulse: B,
-    secondaries: Vec<SecondaryGenerator<F, I2>>,
+    secondaries: Vec<Peekable<SecondaryGenerator<I2>>>,
+}
+
+// The Derive macro is not smart enough to implement Clone in this case.
+impl<I1: Clone, B: Clone, I2: Clone> Clone for PrimaryGenerator<I1, B, I2>
+where
+    I1: PositiveIterator,
+    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I2: PositiveIterator<Type = I1::Type>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            primary: self.primary.clone(),
+            afterpulse: self.afterpulse.clone(),
+            secondaries: self.secondaries.clone(),
+        }
+    }
 }
 
 #[bon]
-impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
+impl<I1, B, I2> PrimaryGenerator<I1, B, I2>
+where
+    I1: PositiveIterator,
+    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I2: PositiveIterator<Type = I1::Type>,
+{
     #[builder]
     pub fn new<T1>(
         /// The source of the primary events.
@@ -189,12 +214,12 @@ impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
         /// The time at which the generator starts producing events. Note that
         /// the first event is produced at `origin` + `delta_t`, where `delta_t`
         /// is the first value produced by `inter_arrival_time`.
-        origin: F,
+        origin: I1::Type,
         /// Length of time the generator produces primary events for. Note that
         /// the generator will keep producing secondary events until all
         /// secondary generators have also been exhausted (which could be after
         /// the primary generator has stopped producing events).
-        duration: Option<Positive<F>>,
+        duration: Option<Positive<I1::Type>>,
         /// The distribution of inter-arrival times between primary events.
         inter_arrival_time: T1,
         /// Secondary generator builder.
@@ -204,16 +229,15 @@ impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
         afterpulse: B,
     ) -> Self
     where
-        F: PartialOrd + for<'a> Add<&'a F, Output = F>,
         T1: IntoIterator<IntoIter = I1>,
-        I1: Iterator<Item = Positive<F>>,
     {
         let primary = SecondaryGenerator::builder()
             .source(source)
             .origin(origin)
             .maybe_duration(duration)
             .inter_arrival_time(inter_arrival_time)
-            .build();
+            .build()
+            .peekable();
 
         Self {
             primary,
@@ -225,25 +249,26 @@ impl<F, I1, B, I2> PrimaryGenerator<F, I1, B, I2> {
 
 use secondary_generator_builder::{IsSet, IsUnset, State};
 
-impl<F, I1, B, I2, T2, S: State> PrimaryGenerator<F, I1, B, I2>
+impl<I1, B, I2, T2, S: State> PrimaryGenerator<I1, B, I2>
 where
-    F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
-    I1: Iterator<Item = Positive<F>>,
-    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, T2, S>,
+    I1: PositiveIterator,
+    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I2: PositiveIterator<Type = I1::Type>,
+    B: FnMut(&WireEvent<I1::Type>) -> SecondaryGeneratorBuilder<I2, T2, S>,
     T2: IntoIterator<IntoIter = I2>,
-    I2: Iterator<Item = Positive<F>>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
 {
-    fn next_primary(&mut self) -> Option<WireEvent<F>> {
+    fn next_primary(&mut self) -> Option<WireEvent<I1::Type>> {
         if let Some(next_event) = self.primary.next() {
-            let generator = (self.afterpulse)(&next_event)
+            let mut generator = (self.afterpulse)(&next_event)
                 .origin(next_event.time.clone())
-                .build();
+                .build()
+                .peekable();
             // Only keep around secondary generators that have something to
             // produce.
-            if generator.next_time.is_some() {
+            if generator.peek().is_some() {
                 self.secondaries.push(generator);
             }
 
@@ -253,54 +278,47 @@ where
         }
     }
 
-    fn next_secondary(&mut self, index: usize) -> WireEvent<F> {
-        // Unwrap is safe because we only keep around generators that have
-        // something to produce.
-        let next_event = self.secondaries[index].next().unwrap();
-        // Only keep around secondary generators that have something to produce.
-        if self.secondaries[index].next_time.is_none() {
-            self.secondaries.swap_remove(index);
+    fn next_secondary(&mut self, index: usize) -> Option<WireEvent<I1::Type>> {
+        let next_event = self.secondaries[index].next();
+        if self.secondaries[index].peek().is_none() {
+            let _ = self.secondaries.swap_remove(index);
         }
 
         next_event
     }
 }
 
-impl<F, I1, B, I2, T2, S: State> Iterator for PrimaryGenerator<F, I1, B, I2>
+impl<I1, B, I2, T2, S: State> Iterator for PrimaryGenerator<I1, B, I2>
 where
-    F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
-    I1: Iterator<Item = Positive<F>>,
-    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, T2, S>,
+    I1: PositiveIterator,
+    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I2: PositiveIterator<Type = I1::Type>,
+    B: FnMut(&WireEvent<I1::Type>) -> SecondaryGeneratorBuilder<I2, T2, S>,
     T2: IntoIterator<IntoIter = I2>,
-    I2: Iterator<Item = Positive<F>>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
 {
-    type Item = WireEvent<F>;
+    type Item = WireEvent<I1::Type>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(index) = self
+        if let Some((index, next_secondary)) = self
             .secondaries
-            .iter()
+            .iter_mut()
+            // We only keep around generators that will return `Some`.
+            .map(|g| g.peek().unwrap())
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                // Unwrap is safe because (given the PositiveIterator trait) we
-                // don't have NaNs.
-                a.next_time.partial_cmp(&b.next_time).unwrap()
-            })
-            .map(|(i, _)| i)
+            // No `NaN` values because of the `PositiveIterator` bound.
+            .min_by(|(_, a), (_, b)| a.time.partial_cmp(&b.time).unwrap())
         {
-            if let Some(next_primary) = &self.primary.next_time {
-                // Unwrap is safe because we only keep around secondary
-                // generators that have something to produce.
-                if next_primary < self.secondaries[index].next_time.as_ref().unwrap() {
+            if let Some(next_primary) = self.primary.peek() {
+                if next_primary.time < next_secondary.time {
                     self.next_primary()
                 } else {
-                    Some(self.next_secondary(index))
+                    self.next_secondary(index)
                 }
             } else {
-                Some(self.next_secondary(index))
+                self.next_secondary(index)
             }
         } else {
             self.next_primary()
@@ -308,13 +326,13 @@ where
     }
 }
 
-impl<F, I1, B, I2, T2, S: State> sealed::OrderedIterator for PrimaryGenerator<F, I1, B, I2>
+impl<I1, B, I2, T2, S: State> sealed::OrderedIterator for PrimaryGenerator<I1, B, I2>
 where
-    F: PartialOrd + for<'a> Add<&'a F, Output = F> + Clone,
-    I1: Iterator<Item = Positive<F>>,
-    B: FnMut(&WireEvent<F>) -> SecondaryGeneratorBuilder<F, I2, T2, S>,
+    I1: PositiveIterator,
+    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I2: PositiveIterator<Type = I1::Type>,
+    B: FnMut(&WireEvent<I1::Type>) -> SecondaryGeneratorBuilder<I2, T2, S>,
     T2: IntoIterator<IntoIter = I2>,
-    I2: Iterator<Item = Positive<F>>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
