@@ -1,6 +1,6 @@
 use bon::bon;
 pub use num_traits::identities::Zero;
-use std::iter::Peekable;
+use std::iter::{zip, Peekable, Zip};
 use std::ops::Add;
 use std::str::FromStr;
 
@@ -74,7 +74,11 @@ impl FromStr for WirePattern {
 /// discriminator outputs ([`WireEvent`]s) are then sent to the trigger system.
 #[derive(Clone, Copy, Debug)]
 pub struct WireEvent<F> {
+    /// The source of the event.
     pub source: Source,
+    /// Anode wire preamp pattern.
+    pub wire_pattern: WirePattern,
+    /// Time of the event.
     pub time: F,
 }
 
@@ -125,27 +129,28 @@ impl<T, I: Iterator<Item = Positive<T>>> PositiveIterator for I {
 /// A generator of [`WireEvent`]s without afterpulses.
 ///
 /// The generator produces a stream of [`WireEvent`]s all with the same
-/// [`Source`]. A generator stops producing events when either it has exhausted
-/// the inter-arrival time distribution or the desired duration has been
-/// reached.
+/// [`Source`]. A generator stops producing events when either the desired
+/// duration has been reached, or when the inter-arrival time/wire pattern
+/// distributions have been exhausted.
 #[derive(Clone, Debug)]
-pub struct SecondaryGenerator<I>
+pub struct SecondaryGenerator<I, P>
 where
     I: PositiveIterator,
 {
     source: Source,
     current_time: Option<I::Type>,
     max_time: Option<I::Type>,
-    inter_arrival_time: I,
+    // (time, wire_pattern)
+    iter: Zip<I, P>,
 }
 
 #[bon]
-impl<I> SecondaryGenerator<I>
+impl<I, P> SecondaryGenerator<I, P>
 where
     I: PositiveIterator,
 {
     #[builder]
-    pub fn new<T>(
+    pub fn new<T1, T2>(
         /// The source of the generated events.
         source: Source,
         /// The time at which the generator starts producing events. Note that
@@ -156,10 +161,13 @@ where
         /// guaranteed to have a time less than `origin` + `duration`.
         duration: Option<Positive<I::Type>>,
         /// The distribution of inter-arrival times between events.
-        inter_arrival_time: T,
+        inter_arrival_time: T1,
+        /// The distribution of wire patterns.
+        wire_pattern: T2,
     ) -> Self
     where
-        T: IntoIterator<IntoIter = I>,
+        T1: IntoIterator<IntoIter = I>,
+        T2: IntoIterator<IntoIter = P>,
         // Another alternative could be
         // `I::Type: for<'a> Add<&'a I::Type, Output = I::Type>` instead.
         // But:
@@ -172,23 +180,24 @@ where
             source,
             current_time: Some(origin.clone()),
             max_time: duration.map(|Positive(t)| t + origin),
-            inter_arrival_time: inter_arrival_time.into_iter(),
+            iter: zip(inter_arrival_time, wire_pattern),
         }
     }
 }
 
-impl<I> Iterator for SecondaryGenerator<I>
+impl<I, P> Iterator for SecondaryGenerator<I, P>
 where
     I: PositiveIterator,
     I::Type: Add<I::Type, Output = I::Type> + Clone + PartialOrd,
+    P: Iterator<Item = WirePattern>,
 {
     type Item = WireEvent<I::Type>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match (self.current_time.take(), self.inter_arrival_time.next()) {
+        match (self.current_time.take(), self.iter.next()) {
             (None, _) => None,
             (_, None) => None,
-            (Some(time), Some(Positive(delta_t))) => {
+            (Some(time), Some((Positive(delta_t), wire_pattern))) => {
                 let time = time + delta_t;
                 if let Some(max_time) = &self.max_time {
                     if time < *max_time {
@@ -202,6 +211,7 @@ where
 
                 Some(WireEvent {
                     source: self.source,
+                    wire_pattern,
                     time,
                 })
             }
@@ -209,10 +219,11 @@ where
     }
 }
 
-impl<I> sealed::OrderedIterator for SecondaryGenerator<I>
+impl<I, P> sealed::OrderedIterator for SecondaryGenerator<I, P>
 where
     I: PositiveIterator,
     I::Type: Add<I::Type, Output = I::Type> + Clone + PartialOrd,
+    P: Iterator<Item = WirePattern>,
 {
 }
 
@@ -221,23 +232,28 @@ where
 /// The generator produces a stream of [`WireEvent`]s in increasing order of
 /// time. Each primary event triggers a set of secondary events. The generator
 /// stops when all primary and secondary events have been produced.
-pub struct PrimaryGenerator<I1, B, I2>
+pub struct PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
     I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
+    P2: Iterator<Item = WirePattern>,
 {
-    primary: Peekable<SecondaryGenerator<I1>>,
+    primary: Peekable<SecondaryGenerator<I1, P1>>,
     afterpulse: B,
-    secondaries: Vec<Peekable<SecondaryGenerator<I2>>>,
+    secondaries: Vec<Peekable<SecondaryGenerator<I2, P2>>>,
 }
 
 // The Derive macro is not smart enough to implement Clone in this case.
-impl<I1: Clone, B: Clone, I2: Clone> Clone for PrimaryGenerator<I1, B, I2>
+impl<I1: Clone, P1: Clone, B: Clone, I2: Clone, P2: Clone> Clone
+    for PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
     I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
+    P2: Iterator<Item = WirePattern>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -249,14 +265,16 @@ where
 }
 
 #[bon]
-impl<I1, B, I2> PrimaryGenerator<I1, B, I2>
+impl<I1, P1, B, I2, P2> PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
     I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
+    P2: Iterator<Item = WirePattern>,
 {
     #[builder]
-    pub fn new<T1>(
+    pub fn new<T1, T2>(
         /// The source of the primary events.
         source: Source,
         /// The time at which the generator starts producing events. Note that
@@ -270,6 +288,8 @@ where
         duration: Option<Positive<I1::Type>>,
         /// The distribution of inter-arrival times between primary events.
         inter_arrival_time: T1,
+        /// The distribution of wire patterns for primary events.
+        wire_pattern: T2,
         /// Secondary generator builder.
         ///
         /// The `origin` of the secondary generator is automatically set to the
@@ -278,12 +298,14 @@ where
     ) -> Self
     where
         T1: IntoIterator<IntoIter = I1>,
+        T2: IntoIterator<IntoIter = P1>,
     {
         let primary = SecondaryGenerator::builder()
             .source(source)
             .origin(origin)
             .maybe_duration(duration)
             .inter_arrival_time(inter_arrival_time)
+            .wire_pattern(wire_pattern)
             .build()
             .peekable();
 
@@ -297,16 +319,20 @@ where
 
 use secondary_generator_builder::{IsSet, IsUnset, State};
 
-impl<I1, B, I2, T2, S: State> PrimaryGenerator<I1, B, I2>
+impl<I1, P1, B, I2, P2, T3, T4, S: State> PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
     I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
-    B: FnMut(&WireEvent<I1::Type>) -> SecondaryGeneratorBuilder<I2, T2, S>,
-    T2: IntoIterator<IntoIter = I2>,
+    P2: Iterator<Item = WirePattern>,
+    B: FnMut(&WireEvent<I1::Type>) -> SecondaryGeneratorBuilder<I2, P2, T3, T4, S>,
+    T3: IntoIterator<IntoIter = I2>,
+    T4: IntoIterator<IntoIter = P2>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
+    S::WirePattern: IsSet,
 {
     fn next_primary(&mut self) -> Option<WireEvent<I1::Type>> {
         if let Some(next_event) = self.primary.next() {
@@ -336,16 +362,20 @@ where
     }
 }
 
-impl<I1, B, I2, T2, S: State> Iterator for PrimaryGenerator<I1, B, I2>
+impl<I1, P1, B, I2, P2, T3, T4, S: State> Iterator for PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
     I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
-    B: FnMut(&WireEvent<I1::Type>) -> SecondaryGeneratorBuilder<I2, T2, S>,
-    T2: IntoIterator<IntoIter = I2>,
+    P2: Iterator<Item = WirePattern>,
+    B: FnMut(&WireEvent<I1::Type>) -> SecondaryGeneratorBuilder<I2, P2, T3, T4, S>,
+    T3: IntoIterator<IntoIter = I2>,
+    T4: IntoIterator<IntoIter = P2>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
+    S::WirePattern: IsSet,
 {
     type Item = WireEvent<I1::Type>;
 
@@ -374,16 +404,21 @@ where
     }
 }
 
-impl<I1, B, I2, T2, S: State> sealed::OrderedIterator for PrimaryGenerator<I1, B, I2>
+impl<I1, P1, B, I2, P2, T3, T4, S: State> sealed::OrderedIterator
+    for PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
     I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
-    B: FnMut(&WireEvent<I1::Type>) -> SecondaryGeneratorBuilder<I2, T2, S>,
-    T2: IntoIterator<IntoIter = I2>,
+    P2: Iterator<Item = WirePattern>,
+    B: FnMut(&WireEvent<I1::Type>) -> SecondaryGeneratorBuilder<I2, P2, T3, T4, S>,
+    T3: IntoIterator<IntoIter = I2>,
+    T4: IntoIterator<IntoIter = P2>,
     S::Source: IsSet,
     S::Origin: IsUnset,
     S::InterArrivalTime: IsSet,
+    S::WirePattern: IsSet,
 {
 }
 
@@ -465,6 +500,7 @@ mod tests {
             .source(Source::Noise)
             .origin(0.0)
             .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            .wire_pattern(vec![WirePattern::from_bits(0)])
             .build();
 
         for event in gen {
@@ -478,6 +514,7 @@ mod tests {
             .source(Source::Noise)
             .origin(-10.0)
             .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            .wire_pattern(vec![WirePattern::from_bits(0)])
             .build();
 
         assert_eq!(gen.next().unwrap().time, -9.0);
@@ -490,6 +527,7 @@ mod tests {
             .origin(0.0)
             .duration(Positive::new(10.0).unwrap())
             .inter_arrival_time(repeat(Positive::new(1.0).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(0)))
             .build()
             .collect::<Vec<_>>();
 
@@ -505,10 +543,28 @@ mod tests {
                 Positive::new(1.0).unwrap(),
                 Positive::new(2.0).unwrap(),
             ])
+            .wire_pattern(repeat(WirePattern::from_bits(0)))
             .build();
 
         assert_eq!(gen.next().unwrap().time, 1.0);
         assert_eq!(gen.next().unwrap().time, 3.0);
+        assert!(gen.next().is_none());
+    }
+
+    #[test]
+    fn secondary_generator_wire_pattern() {
+        let mut gen = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0.0)
+            .inter_arrival_time(repeat(Positive::new(1.0).unwrap()))
+            .wire_pattern(vec![
+                WirePattern::from_bits(0),
+                WirePattern::from_bits(u16::MAX),
+            ])
+            .build();
+
+        assert_eq!(gen.next().unwrap().wire_pattern, WirePattern(0));
+        assert_eq!(gen.next().unwrap().wire_pattern, WirePattern(u16::MAX));
         assert!(gen.next().is_none());
     }
 
@@ -518,10 +574,12 @@ mod tests {
             .source(Source::PrimaryPbar)
             .origin(0.0)
             .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            .wire_pattern(vec![WirePattern::from_bits(0)])
             .afterpulse(|_: &_| {
                 SecondaryGenerator::builder()
                     .source(Source::SecondaryPbar)
                     .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+                    .wire_pattern(vec![WirePattern::from_bits(0)])
             })
             .build();
 
@@ -535,10 +593,12 @@ mod tests {
             .source(Source::PrimaryPbar)
             .origin(0.0)
             .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            .wire_pattern(vec![WirePattern::from_bits(0)])
             .afterpulse(|_: &_| {
                 SecondaryGenerator::builder()
                     .source(Source::SecondaryPbar)
                     .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+                    .wire_pattern(vec![WirePattern::from_bits(0)])
             })
             .build();
 
@@ -552,10 +612,12 @@ mod tests {
             .origin(0.0)
             .duration(Positive::new(10.0).unwrap())
             .inter_arrival_time(repeat(Positive::new(1.0).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(0)))
             .afterpulse(|_: &_| {
                 SecondaryGenerator::builder()
                     .source(Source::SecondaryPbar)
                     .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+                    .wire_pattern(vec![WirePattern::from_bits(0)])
             })
             .build()
             .collect::<Vec<_>>();
@@ -581,16 +643,41 @@ mod tests {
                 Positive::new(1.0).unwrap(),
                 Positive::new(2.0).unwrap(),
             ])
+            .wire_pattern(repeat(WirePattern::from_bits(0)))
             .afterpulse(|_: &_| {
                 SecondaryGenerator::builder()
                     .source(Source::SecondaryPbar)
                     .inter_arrival_time(vec![Positive::new(0.1).unwrap()])
+                    .wire_pattern(vec![WirePattern::from_bits(0)])
             })
-            .build()
-            .filter(|e| matches!(e.source, Source::PrimaryPbar));
+            .build();
 
         assert_eq!(gen.next().unwrap().time, 1.0);
+        assert_eq!(gen.next().unwrap().time, 1.1);
         assert_eq!(gen.next().unwrap().time, 3.0);
+        assert_eq!(gen.next().unwrap().time, 3.1);
+        assert!(gen.next().is_none());
+    }
+
+    #[test]
+    fn primary_generator_wire_pattern() {
+        let mut gen = PrimaryGenerator::builder()
+            .source(Source::PrimaryPbar)
+            .origin(0.0)
+            .inter_arrival_time(repeat(Positive::new(2.0).unwrap()))
+            .wire_pattern(vec![WirePattern::from_bits(0), WirePattern::from_bits(0)])
+            .afterpulse(|_: &_| {
+                SecondaryGenerator::builder()
+                    .source(Source::SecondaryPbar)
+                    .inter_arrival_time(repeat(Positive::new(1.0).unwrap()))
+                    .wire_pattern(vec![WirePattern::from_bits(u16::MAX)])
+            })
+            .build();
+
+        assert_eq!(gen.next().unwrap().wire_pattern, WirePattern(0));
+        assert_eq!(gen.next().unwrap().wire_pattern, WirePattern(u16::MAX));
+        assert_eq!(gen.next().unwrap().wire_pattern, WirePattern(0));
+        assert_eq!(gen.next().unwrap().wire_pattern, WirePattern(u16::MAX));
         assert!(gen.next().is_none());
     }
 
@@ -602,6 +689,7 @@ mod tests {
             .source(Source::PrimaryPbar)
             .origin(0.0)
             .inter_arrival_time(repeat(Positive::new(1.0).unwrap()).take(3))
+            .wire_pattern(repeat(WirePattern::from_bits(0)))
             .afterpulse(|_: &_| {
                 let n = count;
                 let delta_t = 1.0 / (n + 1) as f64;
@@ -610,6 +698,7 @@ mod tests {
                 SecondaryGenerator::builder()
                     .source(Source::SecondaryPbar)
                     .inter_arrival_time(repeat(Positive::new(delta_t).unwrap()).take(n))
+                    .wire_pattern(repeat(WirePattern::from_bits(0)))
             })
             .build();
 
@@ -628,10 +717,12 @@ mod tests {
             .source(Source::PrimaryPbar)
             .origin(0.0)
             .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
+            .wire_pattern(vec![WirePattern::from_bits(0)])
             .afterpulse(|_: &_| {
                 SecondaryGenerator::builder()
                     .source(Source::SecondaryPbar)
                     .inter_arrival_time(vec![Positive::new(2.0).unwrap()])
+                    .wire_pattern(vec![WirePattern::from_bits(0)])
             })
             .build();
         let secondary_gen = SecondaryGenerator::builder()
@@ -639,6 +730,7 @@ mod tests {
             .origin(-10.0)
             .duration(Positive::new(25.0).unwrap())
             .inter_arrival_time(repeat(Positive::new(10.0).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(0)))
             .build();
 
         let mut gen = Generator::builder()
