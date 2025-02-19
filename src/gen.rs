@@ -2,6 +2,7 @@ use bon::bon;
 pub use num_traits::identities::Zero;
 use std::iter::Peekable;
 use std::ops::Add;
+use std::str::FromStr;
 
 /// The source of a [`WireEvent`].
 #[derive(Clone, Copy, Debug)]
@@ -18,6 +19,53 @@ pub enum Source {
     SecondaryPbar,
     /// Noise events.
     Noise,
+}
+
+/// Anode wires pattern.
+///
+/// There are 256 anode wires grouped into 16 boards (each with 16 consecutive
+/// wires). A [`WirePattern`] represents the high/low state of all 16 boards.
+/// A board is considered to be high if any of its wires is over threshold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WirePattern(u16);
+
+impl WirePattern {
+    /// Create a new [`WirePattern`] from a bit pattern. Each bit represents the
+    /// state of a board.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use trg::gen::WirePattern;
+    /// // Only one board is high (the second one from the left).
+    /// //
+    /// // Any number of wires in that board can be over the trigger threshold,
+    /// // but the pattern seen by the trigger system is the same.
+    /// let pattern = WirePattern::from_bits(0b0100000000000000);
+    /// ```
+    pub fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+}
+
+impl FromStr for WirePattern {
+    type Err = std::num::ParseIntError;
+
+    /// Convert a string slice in base 2 to a [`WirePattern`].
+    ///
+    /// # Example
+    /// ```
+    /// # use trg::gen::WirePattern;
+    /// let pattern = "0100000000000000".parse::<WirePattern>()?;
+    /// let expected = WirePattern::from_bits(0b0100000000000000);
+    ///
+    /// assert_eq!(pattern, expected);
+    /// # Ok::<(), std::num::ParseIntError>(())
+    /// ```
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bits = u16::from_str_radix(s, 2)?;
+        Ok(Self(bits))
+    }
 }
 
 /// A [`WireEvent`] represents an input signal to the trigger system.
@@ -400,6 +448,15 @@ mod tests {
         assert_eq!(Positive::new(0.0), None);
         assert_eq!(Positive::new(-1.0), None);
         assert_eq!(Positive::new(1.0), Some(Positive(1.0)));
+    }
+
+    #[test]
+    fn wire_pattern() {
+        let a = WirePattern::from_bits(0b1000000000000000);
+        let b = "1000000000000000".parse::<WirePattern>().unwrap();
+
+        assert_eq!(a, b);
+        assert_eq!(a, WirePattern(32768));
     }
 
     #[test]
