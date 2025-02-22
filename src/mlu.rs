@@ -1,4 +1,5 @@
 use crate::gen::WirePattern;
+use std::fmt;
 
 /// Set of [`WirePattern`]s.
 ///
@@ -122,6 +123,60 @@ impl<const N: usize> From<[WirePattern; N]> for LookupTable {
     /// ```
     fn from(arr: [WirePattern; N]) -> Self {
         Self::from_iter(arr)
+    }
+}
+
+fn bit_pattern_string(n: u16) -> String {
+    format!("{:016b}", n.reverse_bits())
+        .replace("0", ".")
+        .replace("1", "X")
+}
+
+fn bits_string(n: u16) -> String {
+    format!("{} bits", n.count_ones())
+}
+
+fn clusters_string(n: u16) -> String {
+    let mut count = 0;
+    let mut in_cluster = n & (1 << 15) != 0;
+
+    for i in 0..16 {
+        if n & (1 << i) != 0 {
+            if !in_cluster {
+                count += 1;
+                in_cluster = true;
+            }
+        } else {
+            in_cluster = false;
+        }
+    }
+
+    if count == 0 && in_cluster {
+        count += 1;
+    }
+
+    format!("{count} clusters")
+}
+
+impl fmt::Display for LookupTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = self
+            .inner
+            .iter()
+            .enumerate()
+            .filter(|(_, &is_present)| is_present)
+            .map(|(n, _)| {
+                format!(
+                    "0x{n:04x} 1 {}, {}, {}",
+                    bit_pattern_string(u16::try_from(n).unwrap()),
+                    bits_string(u16::try_from(n).unwrap()),
+                    clusters_string(u16::try_from(n).unwrap())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        write!(f, "{text}")
     }
 }
 
