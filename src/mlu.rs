@@ -1,5 +1,11 @@
 use crate::gen::WirePattern;
 use std::fmt;
+use winnow::ascii::{hex_uint, newline};
+use winnow::combinator::{delimited, opt, separated, terminated};
+use winnow::error::ContextError;
+use winnow::Parser;
+
+const TABLE_SIZE: usize = 2usize.pow(16);
 
 /// Set of [`WirePattern`]s.
 ///
@@ -7,7 +13,7 @@ use std::fmt;
 /// produce a TRG signal out of the MLU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LookupTable {
-    inner: [bool; 2usize.pow(16)],
+    inner: [bool; TABLE_SIZE],
 }
 
 impl LookupTable {
@@ -21,7 +27,7 @@ impl LookupTable {
     /// ```
     pub fn new() -> Self {
         Self {
-            inner: [false; 2usize.pow(16)],
+            inner: [false; TABLE_SIZE],
         }
     }
     /// Adds a wire pattern to the lookup table. Returns whether the pattern was
@@ -180,9 +186,97 @@ impl fmt::Display for LookupTable {
     }
 }
 
+// There is no point in adding any `context` to these errors unless I change
+// this to a "tokenize, then parse" approach (allowing for better semantic
+// errors with spans). But given the use case, I don't think it's worth it. A
+// simple "this line is wrong" is enough.
+fn parse_line(input: &mut &str) -> winnow::Result<u16> {
+    let n: u16 = delimited("0x", hex_uint, " 1 ").parse_next(input)?;
+
+    let _ = (
+        bit_pattern_string(n).as_str(),
+        ", ",
+        bits_string(n).as_str(),
+        ", ",
+        clusters_string(n).as_str(),
+    )
+        .parse_next(input)?;
+
+    Ok(n)
+}
+
+/// The error type returned when parsing a [`LookupTable`] fails.
+#[derive(Debug)]
+pub struct ParseError {
+    input: String,
+    span: std::ops::Range<usize>,
+}
+
+impl ParseError {
+    fn from_parse(error: winnow::error::ParseError<&str, ContextError>) -> Self {
+        let input = error.input().to_string();
+        let span = error.char_span();
+        Self { input, span }
+    }
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = annotate_snippets::Level::Error
+            .title("invalid line starting here")
+            .snippet(
+                annotate_snippets::Snippet::source(&self.input)
+                    .fold(true)
+                    .annotation(annotate_snippets::Level::Error.span(self.span.clone())),
+            );
+        let renderer = annotate_snippets::Renderer::plain();
+        let rendered = renderer.render(message);
+        rendered.fmt(f)
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+impl std::str::FromStr for LookupTable {
+    type Err = ParseError;
+
+    /// Parse a [`LookupTable`] from a string. The string should have the same
+    /// format as processed by the real detector.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use trg::mlu::LookupTable;
+    /// # use std::str::FromStr;
+    /// let string = std::fs::read_to_string("mlu_file.txt")?;
+    /// let table = LookupTable::from_str(&string)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let mut inner = [false; TABLE_SIZE];
+
+        let () = terminated(
+            separated(
+                0..,
+                parse_line.map(|n| {
+                    let index = usize::from(n);
+                    inner[index] = true;
+                }),
+                newline,
+            ),
+            opt(newline),
+        )
+        .parse(input)
+        .map_err(ParseError::from_parse)?;
+
+        Ok(Self { inner })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn lookup_table_new() {
@@ -246,5 +340,52 @@ mod tests {
             WirePattern::from_bits(2),
         ]);
         assert_eq!(table, unordered_table);
+    }
+
+    #[test]
+    fn lookup_table_to_string() {
+        let mut table = LookupTable::new();
+        assert_eq!(table.to_string(), "");
+
+        table.insert(WirePattern::from_bits(u16::MAX));
+        assert_eq!(
+            table.to_string(),
+            "0xffff 1 XXXXXXXXXXXXXXXX, 16 bits, 1 clusters"
+        );
+
+        table.insert(WirePattern::from_bits(0));
+        assert_eq!(
+            table.to_string(),
+            "0x0000 1 ................, 0 bits, 0 clusters
+0xffff 1 XXXXXXXXXXXXXXXX, 16 bits, 1 clusters"
+        );
+
+        table.insert(WirePattern::from_bits(36449));
+        assert_eq!(
+            table.to_string(),
+            "0x0000 1 ................, 0 bits, 0 clusters
+0x8e61 1 X....XX..XXX...X, 7 bits, 3 clusters
+0xffff 1 XXXXXXXXXXXXXXXX, 16 bits, 1 clusters"
+        );
+    }
+
+    #[test]
+    fn lookup_table_from_str() {
+        let mut string = String::new();
+        let mut table = LookupTable::new();
+        assert_eq!(table, LookupTable::from_str(&string).unwrap());
+
+        string.push_str("0x0000 1 ................, 0 bits, 0 clusters");
+        table.insert(WirePattern::from_bits(0));
+        assert_eq!(table, LookupTable::from_str(&string).unwrap());
+
+        string.push_str("\n0x0000 1 ................, 0 bits, 0 clusters\n");
+        assert_eq!(table, LookupTable::from_str(&string).unwrap());
+
+        string.push_str("0xffff 1 XXXXXXXXXXXXXXXX, 16 bits, 1 clusters");
+        table.insert(WirePattern::from_bits(u16::MAX));
+        assert_eq!(table, LookupTable::from_str(&string).unwrap());
+
+        assert_eq!(table, LookupTable::from_str(&table.to_string()).unwrap());
     }
 }
