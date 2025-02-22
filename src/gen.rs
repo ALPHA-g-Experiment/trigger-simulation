@@ -27,7 +27,7 @@ pub enum Source {
 /// wires). A [`WirePattern`] represents the high/low state of all 16 boards.
 /// A board is considered to be high if any of its wires is over threshold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WirePattern(u16);
+pub struct WirePattern(pub(crate) u16);
 
 impl WirePattern {
     /// Create a new [`WirePattern`] from a bit pattern. Each bit represents the
