@@ -422,57 +422,6 @@ where
 {
 }
 
-type InnerGen<T> = Box<dyn EventGenerator<Time = T, Item = WireEvent<T>>>;
-
-/// A generator of [`WireEvent`]s.
-///
-/// A [`Generator`] can be composed of multiple [`EventGenerator`]s and produces
-/// a stream of [`WireEvent`]s in increasing order of time. The generator stops
-/// when all of its constituent generators have been exhausted.
-#[derive(bon::Builder)]
-pub struct Generator<T> {
-    #[builder(field)]
-    gens: Vec<Peekable<InnerGen<T>>>,
-}
-
-impl<T, S: generator_builder::State> GeneratorBuilder<T, S> {
-    /// Add an event generator to the [`Generator`].
-    pub fn add_generator<G>(mut self, gen: G) -> Self
-    where
-        G: EventGenerator<Time = T> + 'static,
-    {
-        let mut peekable = (Box::new(gen) as InnerGen<T>).peekable();
-        // Only keep around useful generators.
-        if peekable.peek().is_some() {
-            self.gens.push(peekable);
-        }
-        self
-    }
-}
-
-impl<T: PartialOrd> Iterator for Generator<T> {
-    type Item = WireEvent<T>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let (index, _) = self
-            .gens
-            .iter_mut()
-            // Safe to unwrap because we only keep useful generators.
-            .map(|g| g.peek().unwrap())
-            .enumerate()
-            .min_by(|(_, a), (_, b)| a.time.partial_cmp(&b.time).unwrap())?;
-
-        let next_event = self.gens[index].next();
-        if self.gens[index].peek().is_none() {
-            let _ = self.gens.swap_remove(index);
-        }
-
-        next_event
-    }
-}
-
-impl<T: PartialOrd> sealed::OrderedIterator for Generator<T> {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,40 +657,6 @@ mod tests {
         assert!((gen.next().unwrap().time - 3.0).abs() < 1e-6);
         assert!((gen.next().unwrap().time - 10.0 / 3.0).abs() < 1e-6);
         assert!((gen.next().unwrap().time - 11.0 / 3.0).abs() < 1e-6);
-        assert!(gen.next().is_none());
-    }
-
-    #[test]
-    fn generator() {
-        let primary_gen = PrimaryGenerator::builder()
-            .source(Source::PrimaryPbar)
-            .origin(0.0)
-            .inter_arrival_time(vec![Positive::new(1.0).unwrap()])
-            .wire_pattern(vec![WirePattern::from_bits(0)])
-            .afterpulse(|_: &_| {
-                SecondaryGenerator::builder()
-                    .source(Source::SecondaryPbar)
-                    .inter_arrival_time(vec![Positive::new(2.0).unwrap()])
-                    .wire_pattern(vec![WirePattern::from_bits(0)])
-            })
-            .build();
-        let secondary_gen = SecondaryGenerator::builder()
-            .source(Source::Noise)
-            .origin(-10.0)
-            .duration(Positive::new(25.0).unwrap())
-            .inter_arrival_time(repeat(Positive::new(10.0).unwrap()))
-            .wire_pattern(repeat(WirePattern::from_bits(0)))
-            .build();
-
-        let mut gen = Generator::builder()
-            .add_generator(primary_gen)
-            .add_generator(secondary_gen)
-            .build();
-
-        assert_eq!(gen.next().unwrap().time, 0.0);
-        assert_eq!(gen.next().unwrap().time, 1.0);
-        assert_eq!(gen.next().unwrap().time, 3.0);
-        assert_eq!(gen.next().unwrap().time, 10.0);
         assert!(gen.next().is_none());
     }
 }
