@@ -1,4 +1,4 @@
-use crate::gen::{Positive, WireEvent, WirePattern, Zero};
+use crate::gen::{Positive, WireEvent, WirePattern};
 use std::fmt;
 use std::ops::Add;
 use winnow::ascii::{hex_uint, newline};
@@ -320,7 +320,7 @@ impl<T> Mlu<T>
 where
     T: Add<Output = T> + PartialOrd + Clone,
 {
-    pub(super) fn process_event(&mut self, event: &WireEvent<T>) -> Option<TrgSignal<T>> {
+    pub(super) fn process(&mut self, event: &WireEvent<T>) -> Option<TrgSignal<T>> {
         match std::mem::replace(&mut self.state, MluState::Idle) {
             MluState::Accumulate {
                 stop_time,
