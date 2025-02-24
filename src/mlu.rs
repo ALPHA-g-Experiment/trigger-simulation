@@ -1,5 +1,6 @@
-use crate::gen::WirePattern;
+use crate::gen::{Positive, WireEvent, WirePattern, Zero};
 use std::fmt;
+use std::ops::Add;
 use winnow::ascii::{hex_uint, newline};
 use winnow::combinator::{delimited, opt, separated, terminated};
 use winnow::error::ContextError;
@@ -270,6 +271,108 @@ impl std::str::FromStr for LookupTable {
         .map_err(ParseError::from_parse)?;
 
         Ok(Self { inner })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TrgSignal<T> {
+    pub time: T,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MluState<T> {
+    Idle,
+    // Accumulating wire patterns during the prompt window.
+    Accumulate {
+        // Time when accumulation will stop and a TRG decision will be made.
+        stop_time: T,
+        cumulative: WirePattern,
+    },
+    Wait {
+        stop_time: T,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Mlu<T> {
+    state: MluState<T>,
+    prompt_window: Positive<T>,
+    wait_gate: Positive<T>,
+    table: LookupTable,
+}
+
+impl<T> Mlu<T> {
+    pub(super) fn new(
+        prompt_window: Positive<T>,
+        wait_gate: Positive<T>,
+        table: LookupTable,
+    ) -> Self {
+        Self {
+            state: MluState::Idle,
+            prompt_window,
+            wait_gate,
+            table,
+        }
+    }
+}
+
+impl<T> Mlu<T>
+where
+    T: Add<Output = T> + PartialOrd + Clone,
+{
+    pub(super) fn process_event(&mut self, event: &WireEvent<T>) -> Option<TrgSignal<T>> {
+        match std::mem::replace(&mut self.state, MluState::Idle) {
+            MluState::Accumulate {
+                stop_time,
+                cumulative,
+            } => {
+                if event.time < stop_time {
+                    self.state = MluState::Accumulate {
+                        stop_time,
+                        cumulative: cumulative | event.wire_pattern,
+                    };
+                    None
+                } else if event.time < stop_time.clone() + self.wait_gate.inner().clone() {
+                    self.state = MluState::Wait {
+                        stop_time: event.time.clone() + self.wait_gate.inner().clone(),
+                    };
+                    match self.table.contains(cumulative) {
+                        true => Some(TrgSignal { time: stop_time }),
+                        false => None,
+                    }
+                } else {
+                    self.state = MluState::Accumulate {
+                        stop_time: event.time.clone() + self.prompt_window.inner().clone(),
+                        cumulative: event.wire_pattern,
+                    };
+                    match self.table.contains(cumulative) {
+                        true => Some(TrgSignal { time: stop_time }),
+                        false => None,
+                    }
+                }
+            }
+            MluState::Wait { stop_time } => {
+                if event.time < stop_time {
+                    self.state = MluState::Wait {
+                        stop_time: event.time.clone() + self.wait_gate.inner().clone(),
+                    };
+                    None
+                } else {
+                    self.state = MluState::Accumulate {
+                        stop_time: event.time.clone() + self.prompt_window.inner().clone(),
+                        cumulative: event.wire_pattern,
+                    };
+                    None
+                }
+            }
+            MluState::Idle => {
+                self.state = MluState::Accumulate {
+                    stop_time: event.time.clone() + self.prompt_window.inner().clone(),
+                    cumulative: event.wire_pattern,
+                };
+                None
+            }
+        }
     }
 }
 

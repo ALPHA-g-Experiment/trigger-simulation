@@ -1,7 +1,7 @@
 use bon::bon;
 pub use num_traits::identities::Zero;
 use std::iter::{zip, Peekable, Zip};
-use std::ops::Add;
+use std::ops::{Add, BitOr};
 use std::str::FromStr;
 
 /// The source of a [`WireEvent`].
@@ -45,6 +45,14 @@ impl WirePattern {
     /// ```
     pub fn from_bits(bits: u16) -> Self {
         Self(bits)
+    }
+}
+
+impl BitOr for WirePattern {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
     }
 }
 
@@ -96,6 +104,12 @@ where
         } else {
             None
         }
+    }
+}
+
+impl<F> Positive<F> {
+    pub(crate) fn inner(&self) -> &F {
+        &self.0
     }
 }
 
@@ -174,7 +188,7 @@ where
         // 1. `impl Iterator` requires `I::Type: Clone` anyway.
         // 2. I want to use `Quantity` types from the `uom` crate, and these
         // don't implement `Add<&T, Output = T>` yet (maybe soon they will).
-        I::Type: Add<I::Type, Output = I::Type> + Clone,
+        I::Type: Add<Output = I::Type> + Clone,
     {
         Self {
             source,
@@ -188,7 +202,7 @@ where
 impl<I, P> Iterator for SecondaryGenerator<I, P>
 where
     I: PositiveIterator,
-    I::Type: Add<I::Type, Output = I::Type> + Clone + PartialOrd,
+    I::Type: Add<Output = I::Type> + Clone + PartialOrd,
     P: Iterator<Item = WirePattern>,
 {
     type Item = WireEvent<I::Type>;
@@ -222,7 +236,7 @@ where
 impl<I, P> sealed::OrderedIterator for SecondaryGenerator<I, P>
 where
     I: PositiveIterator,
-    I::Type: Add<I::Type, Output = I::Type> + Clone + PartialOrd,
+    I::Type: Add<Output = I::Type> + Clone + PartialOrd,
     P: Iterator<Item = WirePattern>,
 {
 }
@@ -235,7 +249,7 @@ where
 pub struct PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
-    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I1::Type: Add<Output = I1::Type> + Clone + PartialOrd,
     P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
     P2: Iterator<Item = WirePattern>,
@@ -250,7 +264,7 @@ impl<I1: Clone, P1: Clone, B: Clone, I2: Clone, P2: Clone> Clone
     for PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
-    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I1::Type: Add<Output = I1::Type> + Clone + PartialOrd,
     P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
     P2: Iterator<Item = WirePattern>,
@@ -268,7 +282,7 @@ where
 impl<I1, P1, B, I2, P2> PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
-    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I1::Type: Add<Output = I1::Type> + Clone + PartialOrd,
     P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
     P2: Iterator<Item = WirePattern>,
@@ -322,7 +336,7 @@ use secondary_generator_builder::{IsSet, IsUnset, State};
 impl<I1, P1, B, I2, P2, T3, T4, S: State> PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
-    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I1::Type: Add<Output = I1::Type> + Clone + PartialOrd,
     P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
     P2: Iterator<Item = WirePattern>,
@@ -365,7 +379,7 @@ where
 impl<I1, P1, B, I2, P2, T3, T4, S: State> Iterator for PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
-    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I1::Type: Add<Output = I1::Type> + Clone + PartialOrd,
     P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
     P2: Iterator<Item = WirePattern>,
@@ -408,7 +422,7 @@ impl<I1, P1, B, I2, P2, T3, T4, S: State> sealed::OrderedIterator
     for PrimaryGenerator<I1, P1, B, I2, P2>
 where
     I1: PositiveIterator,
-    I1::Type: Add<I1::Type, Output = I1::Type> + Clone + PartialOrd,
+    I1::Type: Add<Output = I1::Type> + Clone + PartialOrd,
     P1: Iterator<Item = WirePattern>,
     I2: PositiveIterator<Type = I1::Type>,
     P2: Iterator<Item = WirePattern>,
@@ -420,6 +434,53 @@ where
     S::InterArrivalTime: IsSet,
     S::WirePattern: IsSet,
 {
+}
+
+type InnerGen<T> = Box<dyn EventGenerator<Time = T, Item = WireEvent<T>>>;
+
+pub(super) struct Generator<T> {
+    inner: Vec<Peekable<InnerGen<T>>>,
+}
+
+// Deriving `Default` would only work for `T: Default`.
+impl<T> Default for Generator<T> {
+    fn default() -> Self {
+        Self { inner: Vec::new() }
+    }
+}
+
+impl<T> Generator<T> {
+    pub(super) fn add_generator<G>(&mut self, gen: G)
+    where
+        G: EventGenerator<Time = T> + 'static,
+    {
+        let mut peekable = (Box::new(gen) as InnerGen<T>).peekable();
+        // Only keep around useful generators.
+        if peekable.peek().is_some() {
+            self.inner.push(peekable);
+        }
+    }
+}
+
+impl<T: PartialOrd> Iterator for Generator<T> {
+    type Item = WireEvent<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (index, _) = self
+            .inner
+            .iter_mut()
+            // Safe to unwrap because we only keep useful generators.
+            .map(|g| g.peek().unwrap())
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.time.partial_cmp(&b.time).unwrap())?;
+
+        let next_event = self.inner[index].next();
+        if self.inner[index].peek().is_none() {
+            let _ = self.inner.swap_remove(index);
+        }
+
+        next_event
+    }
 }
 
 #[cfg(test)]
@@ -441,6 +502,19 @@ mod tests {
 
         assert_eq!(a, b);
         assert_eq!(a, WirePattern(32768));
+    }
+
+    #[test]
+    fn wire_pattern_bitor() {
+        let a = WirePattern::from_bits(0b1000000000000000);
+        let b = WirePattern::from_bits(0b0100000000000010);
+        let c = WirePattern::from_bits(0b0000000000000010);
+
+        let d = a | b;
+        assert_eq!(d, WirePattern(0b1100000000000010));
+
+        let e = b | c;
+        assert_eq!(e, WirePattern(0b0100000000000010));
     }
 
     #[test]

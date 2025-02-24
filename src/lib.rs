@@ -1,49 +1,42 @@
-use crate::gen::{EventGenerator, WireEvent};
-use std::iter::Peekable;
+use crate::gen::{EventGenerator, Generator, Positive};
+use crate::mlu::{LookupTable, Mlu};
+use bon::bon;
 
 /// Utilities to generate input data for the trigger system.
 pub mod gen;
 /// Memory Lookup Unit.
 pub mod mlu;
 
-type InnerGen<T> = Box<dyn EventGenerator<Time = T, Item = WireEvent<T>>>;
-
-struct Generator<T> {
-    inner: Vec<Peekable<InnerGen<T>>>,
-}
-
-// Deriving `Default` would only work for `T: Default`.
-impl<T> Default for Generator<T> {
-    fn default() -> Self {
-        Self { inner: Vec::new() }
-    }
-}
-
-impl<T: PartialOrd> Iterator for Generator<T> {
-    type Item = WireEvent<T>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let (index, _) = self
-            .inner
-            .iter_mut()
-            // Safe to unwrap because we only keep useful generators.
-            .map(|g| g.peek().unwrap())
-            .enumerate()
-            .min_by(|(_, a), (_, b)| a.time.partial_cmp(&b.time).unwrap())?;
-
-        let next_event = self.inner[index].next();
-        if self.inner[index].peek().is_none() {
-            let _ = self.inner.swap_remove(index);
-        }
-
-        next_event
-    }
-}
-
-#[derive(bon::Builder)]
 pub struct World<T> {
-    #[builder(field)]
-    gen: Generator<T>,
+    generator: Generator<T>,
+    mlu: Mlu<T>,
+    drift_veto: Positive<T>,
+    scaledown: u32,
+    dead_time: Positive<T>,
+}
+
+#[bon]
+impl<T> World<T> {
+    #[builder]
+    pub fn new(
+        #[builder(field)] generator: Generator<T>,
+        prompt_window: Positive<T>,
+        wait_gate: Positive<T>,
+        lookup_table: LookupTable,
+        drift_veto: Positive<T>,
+        scaledown: u32,
+        dead_time: Positive<T>,
+    ) -> Self {
+        let mlu = Mlu::new(prompt_window, wait_gate, lookup_table);
+
+        Self {
+            generator,
+            mlu,
+            drift_veto,
+            scaledown,
+            dead_time,
+        }
+    }
 }
 
 impl<T, S: world_builder::State> WorldBuilder<T, S> {
@@ -52,11 +45,7 @@ impl<T, S: world_builder::State> WorldBuilder<T, S> {
     where
         G: EventGenerator<Time = T> + 'static,
     {
-        let mut peekable = (Box::new(gen) as InnerGen<T>).peekable();
-        // Only keep around useful generators.
-        if peekable.peek().is_some() {
-            self.gen.inner.push(peekable);
-        }
+        self.generator.add_generator(gen);
         self
     }
 }
