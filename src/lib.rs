@@ -40,6 +40,11 @@ pub struct World<T, O> {
     // Inner state of the TRG box
     last_out: Option<T>,
     counter: u32,
+    // Each wire event "flushes" the TRG box. Meaning that the "current" event
+    // is ahead of the "current" TRG signal.
+    // This allows us to keep the observer "time-aware" i.e. it can assume that
+    // everything happens in the correct order.
+    prev_event: Option<WireEvent<T>>,
 }
 
 #[bon]
@@ -66,6 +71,7 @@ impl<T, O> World<T, O> {
             observer,
             last_out: None,
             counter: 0,
+            prev_event: None,
         }
     }
 }
@@ -91,7 +97,12 @@ where
     /// this method will run forever.
     pub fn run(mut self) -> O {
         for event in self.generator {
-            self.observer.on_wire_event(&event);
+            // Needed for time-aware observers
+            if let Some(e) = self.prev_event {
+                self.observer.on_wire_event(&e);
+            }
+            self.prev_event = Some(event.clone());
+
             let Some(trg_signal) = self.mlu.process(&event) else {
                 continue;
             };
@@ -119,6 +130,10 @@ where
             }
             self.observer.on_trg_out(&trg_signal);
             self.last_out = Some(trg_signal.time);
+        }
+        // Needed for time-aware observers
+        if let Some(e) = self.prev_event {
+            self.observer.on_wire_event(&e);
         }
 
         self.observer
@@ -421,5 +436,45 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![5, 13]
         );
+    }
+
+    #[derive(Default)]
+    struct TimeAwareObserver {
+        last_event: Option<WireEvent<i32>>,
+    }
+
+    impl Observer for TimeAwareObserver {
+        type Time = i32;
+
+        fn on_wire_event(&mut self, event: &WireEvent<Self::Time>) {
+            self.last_event = Some(*event);
+        }
+
+        fn on_trg_in(&mut self, signal: &TrgSignal<Self::Time>) {
+            let last_event_time = self.last_event.unwrap().time;
+            assert!(signal.time > last_event_time);
+        }
+    }
+
+    #[test]
+    fn world_time_correctness() {
+        let noise = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0)
+            .duration(Positive::new(7).unwrap())
+            .inter_arrival_time(repeat(Positive::new(3).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(1)))
+            .build();
+        let _ = World::builder()
+            .add_generator(noise)
+            .prompt_window(Positive::new(1).unwrap())
+            .wait_gate(Positive::new(1).unwrap())
+            .lookup_table(LookupTable::from([WirePattern::from_bits(1)]))
+            .drift_veto(Positive::new(1).unwrap())
+            .scaledown(0)
+            .dead_time(Positive::new(2).unwrap())
+            .observer(TimeAwareObserver::default())
+            .build()
+            .run();
     }
 }
