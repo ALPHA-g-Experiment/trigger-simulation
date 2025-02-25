@@ -20,10 +20,12 @@ pub trait Observer {
     fn on_wire_event(&mut self, event: &WireEvent<Self::Time>) {}
     /// Called when a signal goes into the TRG box (i.e. output of the MLU).
     fn on_trg_in(&mut self, signal: &TrgSignal<Self::Time>) {}
-    /// Called when a TRG signal survives the drift veto.
-    fn after_trg_drift_veto(&mut self, signal: &TrgSignal<Self::Time>) {}
-    /// Called when a TRG signal survives the scaledown.
-    fn after_trg_scaledown(&mut self, signal: &TrgSignal<Self::Time>) {}
+    /// Called when a TRG signal is suppressed by the drift veto.
+    fn on_trg_drift_veto(&mut self, signal: &TrgSignal<Self::Time>) {}
+    /// Called when a TRG signal is suppressed by the scaledown.
+    fn on_trg_scaledown(&mut self, signal: &TrgSignal<Self::Time>) {}
+    /// Called when a TRG signal is suppressed by the dead time.
+    fn on_trg_dead_time(&mut self, signal: &TrgSignal<Self::Time>) {}
     /// Called when a trigger signal is sent to the DAQ.
     fn on_trg_out(&mut self, signal: &TrgSignal<Self::Time>) {}
 }
@@ -84,48 +86,39 @@ where
     T: Add<Output = T> + PartialOrd + Clone,
     O: Observer<Time = T>,
 {
+    /// Run a simulation of the trigger system until all generators are
+    /// exhausted. Note that if any of the provided generators are infinite,
+    /// this method will run forever.
     pub fn run(mut self) -> O {
         for event in self.generator {
-            // Wire events "flush" the MLU, so we call `on_trg_in` before
-            // `on_wire_event`.
+            self.observer.on_wire_event(&event);
             let Some(trg_signal) = self.mlu.process(&event) else {
-                self.observer.on_wire_event(&event);
                 continue;
             };
             self.observer.on_trg_in(&trg_signal);
-            self.observer.on_wire_event(&event);
 
-            let Some(prev_out) = &self.last_out else {
-                self.observer.after_trg_drift_veto(&trg_signal);
-                if self.scaledown != 0 {
-                    self.counter += 1;
+            if let Some(prev_out) = &self.last_out {
+                if trg_signal.time <= prev_out.clone() + self.drift_veto.inner().clone() {
+                    self.observer.on_trg_drift_veto(&trg_signal);
                     continue;
                 }
-                self.observer.after_trg_scaledown(&trg_signal);
-                self.observer.on_trg_out(&trg_signal);
-
-                self.last_out = Some(trg_signal.time);
-                continue;
-            };
-
-            if trg_signal.time > prev_out.clone() + self.drift_veto.inner().clone() {
-                self.observer.after_trg_drift_veto(&trg_signal);
-            } else {
-                continue;
             }
 
-            if self.counter == self.scaledown {
-                self.observer.after_trg_scaledown(&trg_signal);
-                self.counter = 0;
-            } else {
+            if self.counter != self.scaledown {
+                self.observer.on_trg_scaledown(&trg_signal);
                 self.counter += 1;
                 continue;
             }
+            self.counter = 0;
 
-            if trg_signal.time > prev_out.clone() + self.dead_time.inner().clone() {
-                self.observer.on_trg_out(&trg_signal);
-                self.last_out = Some(trg_signal.time);
+            if let Some(prev_out) = &self.last_out {
+                if trg_signal.time <= prev_out.clone() + self.dead_time.inner().clone() {
+                    self.observer.on_trg_dead_time(&trg_signal);
+                    continue;
+                }
             }
+            self.observer.on_trg_out(&trg_signal);
+            self.last_out = Some(trg_signal.time);
         }
 
         self.observer
