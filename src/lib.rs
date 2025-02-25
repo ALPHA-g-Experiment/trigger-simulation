@@ -124,3 +124,302 @@ where
         self.observer
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gen::*;
+    use std::iter::repeat;
+
+    #[derive(Default)]
+    struct TestObserver {
+        events: Vec<WireEvent<i32>>,
+        trg_in: Vec<TrgSignal<i32>>,
+        drift_veto: Vec<TrgSignal<i32>>,
+        scaledown: Vec<TrgSignal<i32>>,
+        dead_time: Vec<TrgSignal<i32>>,
+        trg_out: Vec<TrgSignal<i32>>,
+    }
+
+    impl Observer for TestObserver {
+        type Time = i32;
+
+        fn on_wire_event(&mut self, event: &WireEvent<Self::Time>) {
+            self.events.push(*event);
+        }
+
+        fn on_trg_in(&mut self, signal: &TrgSignal<Self::Time>) {
+            self.trg_in.push(*signal);
+        }
+
+        fn on_trg_drift_veto(&mut self, signal: &TrgSignal<Self::Time>) {
+            self.drift_veto.push(*signal);
+        }
+
+        fn on_trg_scaledown(&mut self, signal: &TrgSignal<Self::Time>) {
+            self.scaledown.push(*signal);
+        }
+
+        fn on_trg_dead_time(&mut self, signal: &TrgSignal<Self::Time>) {
+            self.dead_time.push(*signal);
+        }
+
+        fn on_trg_out(&mut self, signal: &TrgSignal<Self::Time>) {
+            self.trg_out.push(*signal);
+        }
+    }
+
+    #[test]
+    fn world_generator() {
+        let noise1 = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0)
+            .duration(Positive::new(3).unwrap())
+            .inter_arrival_time(repeat(Positive::new(2).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(1)))
+            .build();
+        let noise2 = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(1)
+            .duration(Positive::new(3).unwrap())
+            .inter_arrival_time(repeat(Positive::new(2).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(1)))
+            .build();
+
+        let observer = World::builder()
+            .add_generator(noise1)
+            .add_generator(noise2)
+            .prompt_window(Positive::new(100).unwrap())
+            .wait_gate(Positive::new(100).unwrap())
+            .lookup_table(LookupTable::default())
+            .drift_veto(Positive::new(100).unwrap())
+            .scaledown(0)
+            .dead_time(Positive::new(100).unwrap())
+            .observer(TestObserver::default())
+            .build()
+            .run();
+
+        assert_eq!(
+            observer
+                .events
+                .into_iter()
+                .map(|e| e.time)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn world_prompt_window() {
+        let noise = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(-100)
+            .duration(Positive::new(10).unwrap())
+            .inter_arrival_time(repeat(Positive::new(2).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(1)))
+            .build();
+        let observer = World::builder()
+            .add_generator(noise)
+            .prompt_window(Positive::new(3).unwrap())
+            .wait_gate(Positive::new(100).unwrap())
+            .lookup_table(LookupTable::from([WirePattern::from_bits(1)]))
+            .drift_veto(Positive::new(100).unwrap())
+            .scaledown(0)
+            .dead_time(Positive::new(100).unwrap())
+            .observer(TestObserver::default())
+            .build()
+            .run();
+        assert_eq!(
+            observer
+                .trg_in
+                .into_iter()
+                .map(|s| s.time)
+                .collect::<Vec<_>>(),
+            vec![-95]
+        );
+    }
+
+    #[test]
+    fn world_wait_gate() {
+        let noise = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0)
+            .duration(Positive::new(45).unwrap())
+            .inter_arrival_time(repeat(Positive::new(10).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(1)))
+            .build();
+        let observer = World::builder()
+            .add_generator(noise)
+            .prompt_window(Positive::new(9).unwrap())
+            .wait_gate(Positive::new(2).unwrap())
+            .lookup_table(LookupTable::from([WirePattern::from_bits(1)]))
+            .drift_veto(Positive::new(100).unwrap())
+            .scaledown(0)
+            .dead_time(Positive::new(100).unwrap())
+            .observer(TestObserver::default())
+            .build()
+            .run();
+        assert_eq!(
+            observer
+                .trg_in
+                .into_iter()
+                .map(|s| s.time)
+                .collect::<Vec<_>>(),
+            vec![19, 39]
+        );
+    }
+
+    #[test]
+    fn world_lookup_table() {
+        let noise = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0)
+            .inter_arrival_time(repeat(Positive::new(3).unwrap()))
+            .wire_pattern(vec![
+                WirePattern::from_bits(1),
+                WirePattern::from_bits(2),
+                WirePattern::from_bits(1),
+                WirePattern::from_bits(2),
+            ])
+            .build();
+        let observer = World::builder()
+            .add_generator(noise)
+            .prompt_window(Positive::new(1).unwrap())
+            .wait_gate(Positive::new(1).unwrap())
+            .lookup_table(LookupTable::from([WirePattern::from_bits(1)]))
+            .drift_veto(Positive::new(100).unwrap())
+            .scaledown(0)
+            .dead_time(Positive::new(100).unwrap())
+            .observer(TestObserver::default())
+            .build()
+            .run();
+        assert_eq!(
+            observer
+                .trg_in
+                .into_iter()
+                .map(|s| s.time)
+                .collect::<Vec<_>>(),
+            vec![4, 10]
+        );
+    }
+
+    #[test]
+    fn world_drift_veto() {
+        let noise = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0)
+            .duration(Positive::new(21).unwrap())
+            .inter_arrival_time(repeat(Positive::new(4).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(1)))
+            .build();
+        let observer = World::builder()
+            .add_generator(noise)
+            .prompt_window(Positive::new(1).unwrap())
+            .wait_gate(Positive::new(1).unwrap())
+            .lookup_table(LookupTable::from([WirePattern::from_bits(1)]))
+            .drift_veto(Positive::new(5).unwrap())
+            .scaledown(0)
+            .dead_time(Positive::new(7).unwrap())
+            .observer(TestObserver::default())
+            .build()
+            .run();
+        assert_eq!(
+            observer
+                .drift_veto
+                .into_iter()
+                .map(|s| s.time)
+                .collect::<Vec<_>>(),
+            vec![9, 17]
+        );
+    }
+
+    #[test]
+    fn world_scaledown() {
+        let noise = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0)
+            .duration(Positive::new(21).unwrap())
+            .inter_arrival_time(repeat(Positive::new(4).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(1)))
+            .build();
+        let observer = World::builder()
+            .add_generator(noise)
+            .prompt_window(Positive::new(1).unwrap())
+            .wait_gate(Positive::new(1).unwrap())
+            .lookup_table(LookupTable::from([WirePattern::from_bits(1)]))
+            .drift_veto(Positive::new(5).unwrap())
+            .scaledown(1)
+            .dead_time(Positive::new(7).unwrap())
+            .observer(TestObserver::default())
+            .build()
+            .run();
+        assert_eq!(
+            observer
+                .scaledown
+                .into_iter()
+                .map(|s| s.time)
+                .collect::<Vec<_>>(),
+            vec![5, 17]
+        );
+    }
+
+    #[test]
+    fn world_dead_time() {
+        let noise = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0)
+            .duration(Positive::new(21).unwrap())
+            .inter_arrival_time(repeat(Positive::new(4).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(1)))
+            .build();
+        let observer = World::builder()
+            .add_generator(noise)
+            .prompt_window(Positive::new(1).unwrap())
+            .wait_gate(Positive::new(1).unwrap())
+            .lookup_table(LookupTable::from([WirePattern::from_bits(1)]))
+            .drift_veto(Positive::new(1).unwrap())
+            .scaledown(0)
+            .dead_time(Positive::new(7).unwrap())
+            .observer(TestObserver::default())
+            .build()
+            .run();
+        assert_eq!(
+            observer
+                .dead_time
+                .into_iter()
+                .map(|s| s.time)
+                .collect::<Vec<_>>(),
+            vec![9, 17]
+        );
+    }
+
+    #[test]
+    fn world_trg_out() {
+        let noise = SecondaryGenerator::builder()
+            .source(Source::Noise)
+            .origin(0)
+            .duration(Positive::new(21).unwrap())
+            .inter_arrival_time(repeat(Positive::new(4).unwrap()))
+            .wire_pattern(repeat(WirePattern::from_bits(1)))
+            .build();
+        let observer = World::builder()
+            .add_generator(noise)
+            .prompt_window(Positive::new(1).unwrap())
+            .wait_gate(Positive::new(1).unwrap())
+            .lookup_table(LookupTable::from([WirePattern::from_bits(1)]))
+            .drift_veto(Positive::new(1).unwrap())
+            .scaledown(0)
+            .dead_time(Positive::new(7).unwrap())
+            .observer(TestObserver::default())
+            .build()
+            .run();
+        assert_eq!(
+            observer
+                .trg_out
+                .into_iter()
+                .map(|s| s.time)
+                .collect::<Vec<_>>(),
+            vec![5, 13]
+        );
+    }
+}
