@@ -38,7 +38,8 @@ pub struct World<T, O> {
     dead_time: Positive<T>,
     observer: O,
     // Inner state of the TRG box
-    last_out: Option<T>,
+    veto_until: Option<T>,
+    busy_until: Option<T>,
     counter: u32,
     // Each wire event "flushes" the TRG box. Meaning that the "current" event
     // is ahead of the "current" TRG signal.
@@ -69,7 +70,8 @@ impl<T, O> World<T, O> {
             scaledown,
             dead_time,
             observer,
-            last_out: None,
+            veto_until: None,
+            busy_until: None,
             counter: 0,
             prev_event: None,
         }
@@ -108,12 +110,13 @@ where
             };
             self.observer.on_trg_in(&trg_signal);
 
-            if let Some(prev_out) = &self.last_out {
-                if trg_signal.time <= prev_out.clone() + self.drift_veto.inner().clone() {
+            if let Some(veto_until) = &self.veto_until {
+                if trg_signal.time <= *veto_until {
                     self.observer.on_trg_drift_veto(&trg_signal);
                     continue;
                 }
             }
+            self.veto_until = Some(trg_signal.time.clone() + self.drift_veto.inner().clone());
 
             if self.counter != self.scaledown {
                 self.observer.on_trg_scaledown(&trg_signal);
@@ -122,14 +125,14 @@ where
             }
             self.counter = 0;
 
-            if let Some(prev_out) = &self.last_out {
-                if trg_signal.time <= prev_out.clone() + self.dead_time.inner().clone() {
+            if let Some(busy_until) = &self.busy_until {
+                if trg_signal.time <= *busy_until {
                     self.observer.on_trg_dead_time(&trg_signal);
                     continue;
                 }
             }
             self.observer.on_trg_out(&trg_signal);
-            self.last_out = Some(trg_signal.time);
+            self.busy_until = Some(trg_signal.time + self.dead_time.inner().clone());
         }
         // Needed for time-aware observers
         if let Some(e) = self.prev_event {
@@ -353,7 +356,7 @@ mod tests {
         let noise = SecondaryGenerator::builder()
             .source(Source::Noise)
             .origin(0)
-            .duration(Positive::new(21).unwrap())
+            .duration(Positive::new(25).unwrap())
             .inter_arrival_time(repeat(Positive::new(4).unwrap()))
             .wire_pattern(repeat(WirePattern::from_bits(1)))
             .build();
@@ -374,7 +377,7 @@ mod tests {
                 .into_iter()
                 .map(|s| s.time)
                 .collect::<Vec<_>>(),
-            vec![5, 17]
+            vec![5, 21]
         );
     }
 
