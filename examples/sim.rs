@@ -19,9 +19,15 @@ static COSMIC_AFTERPULSES: LazyLock<Vec<Vec<f64>>> = LazyLock::new(|| {
     serde_json::from_str(&contents).unwrap()
 });
 
+static MIXING_AFTERPULSES: LazyLock<Vec<Vec<f64>>> = LazyLock::new(|| {
+    let contents = std::fs::read_to_string("../data/mixing_afterpulses.json").unwrap();
+    serde_json::from_str(&contents).unwrap()
+});
+
 #[derive(Default)]
 struct MyObserver {
-    events: u32,
+    bkg_counter: u32,
+    signal_counter: u32,
     trg_in: u32,
     drift_veto: u32,
     trg_out: u32,
@@ -31,8 +37,10 @@ impl Observer for MyObserver {
     type Time = Time;
 
     fn on_wire_event(&mut self, event: &WireEvent<Self::Time>) {
-        if matches!(event.source, Source::PrimaryPbar) {
-            self.events += 1;
+        match event.source {
+            Source::PrimaryCosmic => self.bkg_counter += 1,
+            Source::PrimaryPbar => self.signal_counter += 1,
+            _ => {}
         }
     }
 
@@ -97,8 +105,7 @@ fn main() -> Result<()> {
                 .sample_iter(rand::rng()),
         )
         .wire_pattern(
-            Bernoulli::new(pass_mlu)
-                .unwrap()
+            Bernoulli::new(pass_mlu)?
                 .map(|i| {
                     if i {
                         WirePattern::from_bits(MLU_INTERESTING)
@@ -124,8 +131,51 @@ fn main() -> Result<()> {
         })
         .build();
 
+    let pass_mlu = Beta::new(
+        signal_passed_mlu + 1.0,
+        signal_total_mlu - signal_passed_mlu + 1.0,
+    )?
+    .sample(&mut rand::rng());
+
+    let signal_gen = PrimaryGenerator::builder()
+        .source(Source::PrimaryPbar)
+        .origin(Time::new::<second>(0.0))
+        .duration(Positive::new(duration).unwrap())
+        .inter_arrival_time(
+            Exp::new(signal_rate.get::<hertz>())?
+                .map(|delta| Positive::new(Time::new::<second>(delta)).unwrap())
+                .sample_iter(rand::rng()),
+        )
+        .wire_pattern(
+            Bernoulli::new(pass_mlu)?
+                .map(|i| {
+                    if i {
+                        WirePattern::from_bits(MLU_INTERESTING)
+                    } else {
+                        WirePattern::from_bits(MLU_NOT_INTERESTING)
+                    }
+                })
+                .sample_iter(rand::rng()),
+        )
+        .afterpulse(|event: &WireEvent<_>| {
+            SecondaryGenerator::builder()
+                .source(Source::SecondaryPbar)
+                .wire_pattern(repeat(event.wire_pattern))
+                .inter_arrival_time(
+                    MIXING_AFTERPULSES
+                        .choose(&mut rand::rng())
+                        .unwrap()
+                        .into_iter()
+                        .map(|n| {
+                            Positive::new(Time::new::<nanosecond>((*n as f64) * 16.0)).unwrap()
+                        }),
+                )
+        })
+        .build();
+
     let observer = World::builder()
         .add_generator(bkg_gen)
+        .add_generator(signal_gen)
         .prompt_window(Positive::new(prompt_window).unwrap())
         .wait_gate(Positive::new(wait_gate).unwrap())
         .lookup_table(LookupTable::from([WirePattern::from_bits(MLU_INTERESTING)]))
@@ -136,7 +186,8 @@ fn main() -> Result<()> {
         .build()
         .run();
 
-    println!("Event counter: {}", observer.events);
+    println!("Background events: {}", observer.bkg_counter);
+    println!("Signal events: {}", observer.signal_counter);
     println!("Input counter: {}", observer.trg_in);
     println!("Drift veto counter: {}", observer.drift_veto);
     println!("Output counter: {}", observer.trg_out);
